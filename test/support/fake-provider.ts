@@ -4,13 +4,16 @@ import type { AddressInfo } from "node:net"
 /**
  * An OpenAI-compatible model endpoint that answers from a script.
  *
- * The spike needs a *real* ClineCore session — hooks, plugins, builders and compaction only prove
- * anything inside the runtime — but it must not need a paid model or network access. Pointing
+ * Anything that proves behaviour *inside* `ClineCore` — hooks, plugins, builders, compaction, and the
+ * adapter bootstrap — needs a real session but must not need a paid model or network access. Pointing
  * `providerId: "openai-compatible"` at `baseUrl` here gives the runtime a provider that speaks the
- * protocol it expects and returns exactly the tool calls the claim under test needs.
+ * protocol it expects and returns exactly the turns the test needs.
  *
  * Both transports matter: several SDKs default to `stream: true`, and a provider that only spoke
- * JSON would make every streaming claim fail for the wrong reason.
+ * JSON would make every streaming assertion fail for the wrong reason.
+ *
+ * It lives under `test/support/` rather than `src/` because it is test infrastructure: the adapter
+ * must never reach for it, and `spikes/` is a point-in-time probe, not a dependency.
  */
 
 export interface ScriptedToolCall {

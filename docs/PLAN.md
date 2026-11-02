@@ -11,7 +11,7 @@ end of every chunk so scope survives a context reset.
 | 2 | done `280fbd9` | Config migration | provider alias + `baseUrl` + `arbitration`, credential chain with provenance, retired-env fatal, fingerprint v2 | `pnpm typecheck`, 68 tests, `pnpm spike:sdk` exit 0 |
 | 3 | done `1e732af` | Harness tree on disk | materialise a `HarnessTree` into a run directory and read it back; `TreePatch` gains deletion; this file | round-trips, deletion, containment, collisions |
 | 4 | impl ✓ | Baseline snapshot `e_0` | capture a target repo into a tree + git sha + baseline fingerprint | baseline fingerprint is complete and re-derivable; the probe fingerprint is composed in Chunks 7–8 |
-| 5 | planned | Adapter session bootstrap | first chunk that talks to `ClineCore`: build a session from a materialised tree (provider, compiled prompt, tools) | session starts and one turn completes |
+| 5 | impl ✓ | Adapter session bootstrap | first chunk that talks to `ClineCore`: build a session from a materialised tree (provider, compiled prompt, tools) | session starts and one turn completes — proven live, in the default `pnpm test` |
 | 6 | planned | Ledger + artifact store | 4k/3k execution/improvement accounting, JSONL run ledger, probe record persistence | counts are exact and replayable |
 | 7 | draft | Tool policy + inventory (c2) | tool descriptions as tree files, allow/deny policy set, `toolInventoryHash` | policy actually gates a call |
 | 8 | draft | Prompt compiler (c0/c1) | assemble tree files into the compiled prompt; `compiledPromptHash` | hash changes iff the tree changes |

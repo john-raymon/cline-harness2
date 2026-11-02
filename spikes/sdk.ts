@@ -8,7 +8,7 @@ import {
   startFakeProvider,
   type ChatRequest,
   type ScriptedTurn,
-} from "./fake-provider.ts"
+} from "../test/support/fake-provider.ts"
 
 /**
  * Chunk 1 SDK spike.

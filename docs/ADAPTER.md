@@ -211,6 +211,55 @@ of it. `probeFingerprintSchema` is untouched: `toolInventoryHash`, `compiledProm
 `dependencyLockHash` is `string | null`, where `null` means "no lockfile" — a different state from an empty
 one, and composition must reject it rather than substitute a digest.
 
+## Session bootstrap (Chunk 5)
+
+`src/adapter/session.ts` is the only place that starts a real `ClineCore` session. What it does, in the
+order the code does it, and why:
+
+1. **Credentials first.** A missing key is an `API_KEY_MISSING` refusal, not a session that fails later
+   with a provider error. The key goes to the SDK and is never recorded; the record carries
+   `apiKeySource` (a name) instead.
+2. **Claim gate before the filesystem.** `requiredClaimsFor(tree)` requires `B1.skills` exactly when the
+   tree ships `.cline/skills/**`, because mounting the tree as `cwd` is what makes the built-in skills
+   tool appear — the claim's own limitation says an allowlist is not the gate. An empty requirement
+   short-circuits without reading `.tmp/spike-evidence.json`, so a machine that never ran the spike can
+   still bootstrap a skills-free tree. The remedy in every refusal is `pnpm spike:sdk`.
+3. **Run directory, then the tree.** `<root>/<runId>/harness/` is claimed exclusively and materialised
+   from the captured tree. The id is validated as a single path component because Chunk 20 will pass it
+   from argv. A materialisation failure removes the directory this call created; a failure *after* that
+   leaves it on disk deliberately, because a run directory is the evidence of what was attempted.
+4. **The session is local and pre-identified.** `backendMode: "local"` only: a hub or remote runtime
+   executes elsewhere and none of the spike evidence describes it. `sessionId` is set to the run id
+   *before* starting, because `StartSessionResult.sessionId` only exists once `start()` resolves — and
+   `abort()` is needed precisely when it never does.
+5. **`cwd` is the materialised copy.** `cwd` and `workspaceRoot` both point at `<runId>/harness`, so a
+   turn cannot touch the operator's repository or the SSOT. Provisional: c2 decides where a *productive*
+   run works, and that decision needs a policy that does not exist yet.
+6. **Tools enabled, then denied.** `enableTools: true` with a default `beforeTool` hook returning
+   `{ skip: true }` for every call. `B5.hooks` established that `skip` really prevents the side effect,
+   so this is a gate rather than a hint. `yolo: true` only removes the approval prompt a headless run
+   could never answer; with every call skipped it is never reached.
+7. **`checkpoint: { enabled: false }` is pinned.** The SDK defaults it off, but a future default flip
+   would begin taking git stash refs in the session workspace, which is not something to inherit.
+8. **Teardown is ordered and bounded.** Unsubscribe, then `dispose()`, both `abort()` and `dispose()`
+   raced against a teardown deadline so a runtime that never releases cannot turn a bounded turn into
+   an unbounded epilogue. A dispose failure after a successful turn is `SESSION_DISPOSE_FAILED` — a
+   possibly-running agent is worse than an unreturned record — while a dispose failure after a failed
+   turn is swallowed so it cannot hide the real error.
+9. **Caller-supplied delays are validated.** A `timeoutMs` of `0`, `NaN` or more than `2**31 - 1` is
+   refused with `TIMEOUT_INVALID` rather than handed to `setTimeout`, which silently turns every one of
+   those into a ~1ms timer and would abort the session on the next tick.
+
+`SessionBootstrapRecord` is the handoff to Chunk 6: `manifestPath`/`messagesPath` point at the SDK's own
+transcript, `eventTypes` is deduped and capped at 128 with `eventCount` keeping the true total, and
+`promptSource` is already an enum so the prompt compiler takes over without a schema change. Nothing is
+persisted; the only durable effect of this chunk is the run directory.
+
+Verification is live, not mocked: the test spawns `test/support/live-session-child.ts`, which redirects
+`HOME`/`XDG_DATA_HOME`/`USERPROFILE`/`APPDATA` into a temporary directory *before* importing the SDK (it
+latches its SQLite location at import), runs one turn against `test/support/fake-provider.ts`, and prints
+one JSON line that the parent validates with the same zod schema the adapter returns.
+
 ## Known debt carried forward
 
 - **The tree store assumes it owns the directory.** `materialiseTree` claims a non-existent leaf with
@@ -266,5 +315,16 @@ one, and composition must reject it rather than substitute a digest.
 - **Executable components are refused, not supported.** `scripts/verify-helpers` joins the manifest when
   materialisation carries a mode map and the mode participates in the hash; until then refusing is the
   honest option.
+- **The bootstrap proves a turn, not tool execution.** Every tool call is refused by the default hook, so
+  nothing in Chunk 5 establishes that a tool *works* inside a materialised tree. c2 owns that.
+- **`cwd` = the harness copy is provisional.** Until the tool policy exists there is no way to let a turn
+  act on the target repository safely, so the bootstrap deliberately cannot.
+- **Run directories are never pruned.** Exclusivity means a crashed run leaves a directory behind and a
+  retry must choose a new id; nothing reclaims the old one.
+- **The claim gate is only wired for skills.** `B2.plugin`, `B5.hooks` and `B6.subagent` belong to chunks
+  that have not landed. The gate accepts those ids today, but nothing requires them yet.
+- **`@cline/sdk`'s own `dist/index.d.ts` is a one-line re-export.** The real session surface lives in
+  `@cline/core`, so reading it means `.pnpm/@cline+core@*/node_modules/@cline/core/dist`, not
+  `node_modules/@cline/sdk/dist`.
 
 
