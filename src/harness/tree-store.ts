@@ -1,5 +1,5 @@
 import type { Stats } from "node:fs"
-import { lstat, mkdir, open, readdir, rm, writeFile } from "node:fs/promises"
+import { lstat, mkdir, readdir, rm, writeFile } from "node:fs/promises"
 import path from "node:path"
 
 import {
@@ -10,6 +10,7 @@ import {
   relPathSchema,
   type HarnessTree,
 } from "../domain/schemas.ts"
+import { ReadError, UTF8, readCappedText } from "./fs-read.ts"
 
 /**
  * Filesystem adapter for a harness tree.
@@ -63,18 +64,6 @@ export class TreeStoreError extends Error {
 }
 
 const WRITE_CONCURRENCY = 8
-
-/** Largest single allocation while reading a file; the total is still capped by `TREE_LIMITS`. */
-const READ_CHUNK_BYTES = 64 * 1024
-
-/**
- * `ignoreBOM: true` keeps a leading BOM as `U+FEFF` instead of swallowing it.
- *
- * The default (`false`) strips it, so a file written with a BOM would come back one byte shorter and
- * every hash over it would change. `fatal: true` turns malformed bytes into a throw instead of a
- * silent `U+FFFD`.
- */
-const UTF8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true })
 
 function errorCode(error: unknown): string | undefined {
   return (error as { code?: string } | null | undefined)?.code
@@ -398,79 +387,28 @@ async function walk(
 }
 
 /**
- * Read a regular file, refusing anything that cannot be a harness file.
+ * Read a regular file for a directory this store owns.
  *
- * The read loops until EOF because a single `read` is allowed to return a short count — treating the
- * first chunk as the whole file would silently truncate it. Allocation stays bounded: each chunk is
- * at most 64 KiB and the loop aborts as soon as the total passes the cap, even if the file grew after
- * `stat`.
+ * The hardening lives in `fs-read.ts`, which is shared with the baseline capture. This wrapper only
+ * translates its error type so callers of the tree store keep seeing `TreeStoreError`, and keeps the
+ * store's own policy: a scratch harness tree contains single-link files, so a hardlink is refused.
  */
 async function readFileCapped(
   absolute: string,
   relative: string,
 ): Promise<{ body: string; bytes: number }> {
-  let handle
   try {
-    handle = await open(absolute, "r")
-  } catch (error) {
-    throw new TreeStoreError("READ_FAILED", `could not open ${relative}`, {
+    const result = await readCappedText(absolute, {
       relPath: relative,
-      cause: error,
+      maxBytes: TREE_LIMITS.maxFileBytes,
+      allowHardlink: false,
     })
-  }
-  try {
-    const info = await handle.stat()
-    if (!info.isFile()) {
-      throw new TreeStoreError("UNSUPPORTED_ENTRY", `${relative} is not a regular file`, {
-        relPath: relative,
-      })
+    return { body: result.body, bytes: result.bytes }
+  } catch (error) {
+    if (error instanceof ReadError) {
+      throw new TreeStoreError(error.code, error.message, { relPath: error.relPath, cause: error })
     }
-    // A second link is an alias to bytes that may live outside the workspace (think ~/.ssh/id_rsa).
-    // The root is meant to own its files, so an extra link is refused rather than copied in.
-    if (info.nlink > 1) {
-      throw new TreeStoreError(
-        "HARDLINK_FORBIDDEN",
-        `${relative} has ${info.nlink} hard links; a harness tree contains single-link files only`,
-        { relPath: relative },
-      )
-    }
-    if (info.size > TREE_LIMITS.maxFileBytes) {
-      throw new TreeStoreError(
-        "TOO_LARGE",
-        `${relative} is ${info.size} bytes, over the ${TREE_LIMITS.maxFileBytes}-byte file limit`,
-        { relPath: relative },
-      )
-    }
-
-    const chunks: Buffer[] = []
-    let total = 0
-    for (;;) {
-      const room = TREE_LIMITS.maxFileBytes + 1 - total
-      const chunk = Buffer.allocUnsafe(Math.min(READ_CHUNK_BYTES, room))
-      const { bytesRead } = await handle.read(chunk, 0, chunk.length, total)
-      if (bytesRead === 0) break
-      total += bytesRead
-      if (total > TREE_LIMITS.maxFileBytes) {
-        throw new TreeStoreError(
-          "TOO_LARGE",
-          `${relative} grew past the ${TREE_LIMITS.maxFileBytes}-byte file limit while being read`,
-          { relPath: relative },
-        )
-      }
-      chunks.push(chunk.subarray(0, bytesRead))
-    }
-
-    let body: string
-    try {
-      body = UTF8.decode(Buffer.concat(chunks, total))
-    } catch (error) {
-      throw new TreeStoreError("NOT_UTF8", `${relative} is not valid UTF-8`, {
-        relPath: relative,
-        cause: error,
-      })
-    }
-    return { body, bytes: total }
-  } finally {
-    await handle.close()
+    throw error
   }
 }
+

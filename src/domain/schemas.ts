@@ -317,7 +317,7 @@ export const REASONING_EFFORTS = [
 export const reasoningEffortSchema = z.enum(REASONING_EFFORTS)
 export type ReasoningEffort = z.infer<typeof reasoningEffortSchema>
 
-const sha256HexSchema = z
+export const sha256HexSchema = z
   .string()
   .regex(/^[0-9a-f]{64}$/, "expected a lowercase hex sha256 digest")
 

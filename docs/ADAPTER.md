@@ -156,11 +156,60 @@ also a directory prefix of another key (`a` and `a/b`), or two keys that fold to
 case-insensitive volume (`SystemPrompt.md`/`systemprompt.md`, and `A/x` with `a/y`). Checks are pure
 and run before the first byte is written, so a bad tree leaves no partial directory.
 
-This is deliberately harness-tree-only. If Chunk 4 needs to reference arbitrary POSIX repo paths —
-where `notes:2024.md` is a perfectly legal filename — it must use its own repo-path schema rather than
-weakening this one. It must also not slurp a repository through `readTree`: `.git` holds binary pack
-files and empty directories, real repos exceed the file cap and carry lockfiles past 1 MiB, so the
-baseline belongs in git plumbing (commit sha, worktree, tracked diff) rather than in a `HarnessTree`.
+This is deliberately harness-tree-only. `notes:2024.md` is a legal POSIX filename and an illegal tree
+key, so a repository is never read through `readTree`; Chunk 4 captures its declared components with its
+own reader and keeps `.git` and `node_modules` out of the walk entirely (see the section below).
+
+## Baseline capture provenance (Chunk 4)
+
+`e_0` is not the repository. It is the *harness* of the repository: a whitelist of declared components
+(`.clinerules`, `EXPERIENCE.md`, `.cline/skills`), captured read-only, plus git metadata. `node_modules/`
+and `.git/` are never entered because they are not components; anything skipped inside a component is
+reported in `excluded` with a reason rather than dropped. `scripts/verify-helpers` is deliberately out of
+the manifest until materialisation can carry a mode: capture refuses executables
+(`EXECUTABLE_FORBIDDEN`) instead of writing them back as `0o644`.
+
+**A tree holds bodies, not links.** A symlinked rule file is read through, so `materialiseTree` receives a
+regular file, and the link itself is recorded as provenance: `origin` says `symlink` with the hop count and
+the resolved root, and `canonical` records the declared SSOT counterpart with its own digest and an
+`identical` flag. A generated copy and its canonical source are **not** normalised into agreement — they
+are different effective inputs, they hash differently, and the drift stays visible (`identical: false`).
+Declared mappings are per destination; there is no directory-prefix grant, because a link inside the SSOT
+must not be able to redirect a body to a file nobody named.
+
+**Containment is `path.relative` over resolved paths.** Both roots are `realpath`ed, and
+`path.relative(root, target)` is rejected when it is empty, `..`, `../…` or absolute — `startsWith(root)`
+would accept `/root-evil`. A link target is resolved **component by component in filesystem order**, not
+with `path.resolve`: for `alias/../rules.md` where `alias` points at `real/subdir`, the kernel reaches
+`real/rules.md` while lexical normalisation picks `rules.md` beside the link. `..` pops the *resolved*
+stack, hops are counted (only inside an authorised root, so a host alias like macOS `/var` → `/private/var`
+cannot inflate the count), and a cycle is a named error instead of `ELOOP`. Cycle detection tracks the
+links whose expansion is still in progress — a revisit of an *active* link is the cycle — because a
+total-expansion backstop is the only other way to stop `a -> a/b`, which deepens the path on every pass.
+Component paths are walked segment by segment, so a symlinked ancestor (`.cline` in `.cline/skills`) is
+authorised per hop instead of being silently followed by `realpath`. A trailing `/` or `/.` still demands
+a directory, so `file.md/` is `ENOTDIR` rather than the file.
+
+**Exclusions hold at every depth, on both sides.** A link is not a way around the prune: a resolved target
+inside `node_modules`, `.git`, `.tmp` or a `.DS_Store` raises `LINK_INTO_EXCLUDED`, whether it lands in the
+repository or in the SSOT, and a component path may not carry an excluded segment at any position.
+
+**A declared source names a file, not a link.** If `folder-x.md` is itself a symlink, following it would
+let the declaration authorise whatever that link happens to point at, so capture refuses it
+(`CANONICAL_SOURCE_MISSING`) rather than resolving through. The parent directory is still resolved, because
+that is an OS alias, not a declaration.
+
+**Every hashed byte is a proven byte.** Reads that contribute to the fingerprint (`readStable`) compare the
+`lstat` before opening, the descriptor identity from `fstat`, and the `lstat` after closing; a mismatch —
+including an atomic same-size replacement — is `SOURCE_CHANGED`. The lockfile gets the same treatment under
+its own 64 MiB cap, because a digest over half of one version and half of another is worse than an error.
+
+**The fingerprint is baseline-only.** `baselineFingerprintSchema` covers `manifestSha`, `baseSha`,
+`isDirty`, `dependencyLockHash`, `treeSha` and `ssotRulesHash`; `baselineSha` hashes an explicit projection
+of it. `probeFingerprintSchema` is untouched: `toolInventoryHash`, `compiledPromptHash`, `toolPolicySet` and
+`slices` belong to Chunks 7–8, and composing the probe fingerprint from this one is their job.
+`dependencyLockHash` is `string | null`, where `null` means "no lockfile" — a different state from an empty
+one, and composition must reject it rather than substitute a digest.
 
 ## Known debt carried forward
 
@@ -202,5 +251,20 @@ baseline belongs in git plumbing (commit sha, worktree, tracked diff) rather tha
 - **`validate at the schema` is not a merge guarantee.** Zod rejects `__proto__`/`constructor`/
   `prototype` path segments and non-plain objects, but `applyTreePatch` will faithfully apply whatever
   a caller hands it. Internal callers must pass parsed trees, or the merge itself needs a guard.
+- **Capture is not atomic and does not claim to be.** It assumes quiescent sources: a post-read `lstat`
+  comparing `ino`, `size` and `mtimeMs` catches an ordinary mid-read edit (`SOURCE_CHANGED`), but a
+  hostile concurrent writer is out of scope, exactly as it is for the tree store.
+- **Hardlinks are allowed in capture and refused in the tree store.** The asymmetry is deliberate:
+  capture is read-only, and a repository legitimately hardlinks (`pnpm` does it throughout
+  `node_modules`). The link count is recorded as `hardlinked: true` and never hashed.
+- **An undeclared link may only reach `ssot/.clinerules/`.** Anywhere else in the SSOT needs an explicit
+  per-destination `canonicalSources` mapping, and a declared source must be the file itself, never a link.
+  That bounds a bad link without forcing every project to enumerate its filenames.
+- **`isDirty` is coarse.** It reports tracked index/worktree changes excluding submodules and says nothing
+  about untracked files, so two different dirty states share one fingerprint. Comparing probes across runs
+  will need a worktree-content identity or a frozen-clean policy.
+- **Executable components are refused, not supported.** `scripts/verify-helpers` joins the manifest when
+  materialisation carries a mode map and the mode participates in the hash; until then refusing is the
+  honest option.
 
 
