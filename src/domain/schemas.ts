@@ -131,6 +131,85 @@ const sha256HexSchema = z
   .string()
   .regex(/^[0-9a-f]{64}$/, "expected a lowercase hex sha256 digest")
 
+const LOOPBACK_IPV4 = /^127(?:\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/
+const WHITESPACE_OR_CONTROL = /[\s\u0000-\u001f\u007f]/
+
+/**
+ * True only for hosts that cannot leave the machine.
+ *
+ * `new URL` hands back the IPv6 host *with* brackets and has already normalised exotic IPv4 forms
+ * (`0x7f000001`, `127.1`) to dotted quads, so the checks below run on the normalised host. Equality
+ * is exact on purpose: `endsWith("localhost")` would happily accept `localhost.evil.com`.
+ *
+ * `*.localhost` (RFC 6761) is deliberately *not* accepted: it is only loopback if the resolver
+ * honours the RFC, and this check must not depend on the resolver. IPv4-mapped `[::ffff:7f00:1]` is
+ * rejected for the same reason — the operator gets an actionable message instead of a silent choice.
+ */
+function isLoopbackHost(hostname: string): boolean {
+  return (
+    hostname === "localhost" ||
+    hostname === "localhost." ||
+    hostname === "[::1]" ||
+    LOOPBACK_IPV4.test(hostname)
+  )
+}
+
+/**
+ * The solver endpoint, normalised to one canonical spelling.
+ *
+ * `baseUrl` changes which client speaks and which capability set is available, so two runs against
+ * different endpoints are not a matched contrast. Normalising here means the fingerprint records a
+ * value that is comparable rather than whatever string the caller typed.
+ */
+export const baseUrlSchema = z.string().transform((value, ctx) => {
+  const reject = (message: string): typeof z.NEVER => {
+    ctx.addIssue({ code: "custom", message })
+    return z.NEVER
+  }
+  if (value.length === 0) return reject("base URL must not be empty")
+  // Checked on the raw string: the WHATWG parser silently rewrites "\" to "/" in the authority.
+  if (value.includes("\\")) return reject("base URL must not contain a backslash")
+  if (WHITESPACE_OR_CONTROL.test(value)) {
+    return reject("base URL must not contain whitespace or control characters")
+  }
+
+  let url: URL
+  try {
+    url = new URL(value)
+  } catch {
+    return reject(`base URL is not a valid absolute URL: ${JSON.stringify(value)}`)
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:") {
+    return reject(`base URL must use https, or http for loopback; got ${url.protocol}`)
+  }
+  if (url.username !== "" || url.password !== "") {
+    return reject("base URL must not embed credentials")
+  }
+  if (url.search !== "") return reject("base URL must not contain a query string")
+  if (url.hash !== "") return reject("base URL must not contain a fragment")
+  if (url.protocol === "http:" && !isLoopbackHost(url.hostname)) {
+    return reject(
+      `plain http is only allowed for loopback endpoints; ${url.hostname} is not loopback`,
+    )
+  }
+
+  // `url.host` keeps the explicit port and the IPv6 brackets; only trailing path slashes go.
+  return `${url.protocol}//${url.host}${url.pathname.replace(/\/+$/, "")}`
+})
+
+export const ARBITRATION_MODES = ["off", "probe"] as const
+export const arbitrationModeSchema = z.enum(ARBITRATION_MODES)
+export type ArbitrationMode = z.infer<typeof arbitrationModeSchema>
+
+/** A model id is one opaque token: `hf:deepseek-ai/DeepSeek-V4.1-Flash-1017` is legal. */
+const modelIdSchema = z
+  .string()
+  .min(1)
+  .refine((value) => !WHITESPACE_OR_CONTROL.test(value), {
+    message: "model id must be a single token with no whitespace or control characters",
+  })
+
+
 /**
  * Resolved configuration for one run.
  *
@@ -148,7 +227,9 @@ export const runConfigSchema = z
     targetTokens: z.int().positive(),
     tailTokens: z.int().nonnegative(),
     providerId: z.string().min(1),
-    modelId: z.string().min(1),
+    modelId: modelIdSchema,
+    baseUrl: baseUrlSchema,
+    arbitration: arbitrationModeSchema,
     apiKey: z.string().min(1).optional(),
     root: z.string().min(1),
   })
@@ -184,7 +265,7 @@ export const runConfigSchema = z
 
 export type RunConfig = z.infer<typeof runConfigSchema>
 
-export const PROBE_FINGERPRINT_VERSION = 1
+export const PROBE_FINGERPRINT_VERSION = 2
 
 /**
  * Everything that must be identical for a probe to count as a matched contrast against `e_0`.
@@ -197,7 +278,8 @@ export const probeFingerprintSchema = z.strictObject({
   baseSha: z.string().regex(/^[0-9a-f]{40}$/, "expected a 40-character git commit sha"),
   dependencyLockHash: sha256HexSchema,
   providerId: z.string().min(1),
-  modelId: z.string().min(1),
+  modelId: modelIdSchema,
+  baseUrl: baseUrlSchema,
   reasoningEffort: reasoningEffortSchema,
   thinking: z.boolean(),
   toolPolicySet: z.array(z.string().min(1)),

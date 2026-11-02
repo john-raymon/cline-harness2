@@ -128,6 +128,8 @@ const validConfig = {
   tailTokens: 24_000,
   providerId: "openai-compatible",
   modelId: "test-model",
+  baseUrl: "https://api.synthetic.new/openai/v1",
+  arbitration: "off",
   root: "/tmp/harness2-run",
 } as const
 
@@ -155,6 +157,38 @@ describe("runConfigSchema", () => {
     assert.equal(runConfigSchema.safeParse({ ...validConfig, extra: true }).success, false)
     assert.equal(runConfigSchema.safeParse({ ...validConfig, mode: "agg" }).success, false)
   })
+
+  it("stores one canonical endpoint spelling", () => {
+    const parsed = runConfigSchema.parse({ ...validConfig, baseUrl: "https://Api.Synthetic.new/openai/v1//" })
+    assert.equal(parsed.baseUrl, "https://api.synthetic.new/openai/v1")
+  })
+
+  it("refuses an endpoint that could not be reached safely", () => {
+    const cases = [
+      "http://api.synthetic.new/v1", // plain http off loopback
+      "http://localhost.evil.com/v1", // suffix match, not loopback
+      "https://user:pass@api.synthetic.new/v1", // embedded credentials
+      "https://api.synthetic.new/v1?key=1",
+      "https://api.synthetic.new/v1#frag",
+      "file:///etc/passwd",
+      "",
+    ]
+    for (const baseUrl of cases) {
+      assert.equal(
+        runConfigSchema.safeParse({ ...validConfig, baseUrl }).success,
+        false,
+        `expected rejection: ${JSON.stringify(baseUrl)}`,
+      )
+    }
+  })
+
+  it("rejects a model id that is not a single token", () => {
+    assert.equal(runConfigSchema.safeParse({ ...validConfig, modelId: "two words" }).success, false)
+    assert.equal(
+      runConfigSchema.safeParse({ ...validConfig, modelId: "hf:moonshotai/Kimi-K3" }).success,
+      true,
+    )
+  })
 })
 
 describe("budget identity", () => {
@@ -177,11 +211,12 @@ describe("budget identity", () => {
 
 describe("probe fingerprint", () => {
   const fingerprint = {
-    version: 1,
+    version: 2,
     baseSha: "0".repeat(40),
     dependencyLockHash: "a".repeat(64),
     providerId: "openai-compatible",
-    modelId: "test-model",
+    modelId: "hf:deepseek-ai/DeepSeek-V4.1-Flash-1017",
+    baseUrl: "https://api.synthetic.new/openai/v1",
     reasoningEffort: "high",
     thinking: true,
     toolPolicySet: ["run_commands:allow"],
@@ -197,11 +232,33 @@ describe("probe fingerprint", () => {
     assert.equal(probeFingerprintSchema.safeParse(fingerprint).success, true)
   })
 
-  it("rejects a future version, a short sha and a missing freeze field", () => {
-    assert.equal(probeFingerprintSchema.safeParse({ ...fingerprint, version: 2 }).success, false)
+  it("rejects the previous version instead of upgrading it", () => {
+    assert.equal(
+      probeFingerprintSchema.safeParse({ ...fingerprint, version: 1 }).success,
+      false,
+      "a v1 record predates the endpoint field and must be regenerated",
+    )
+    assert.equal(probeFingerprintSchema.safeParse({ ...fingerprint, version: 3 }).success, false)
+  })
+
+  it("requires the endpoint and the other freeze fields", () => {
     assert.equal(probeFingerprintSchema.safeParse({ ...fingerprint, baseSha: "abc" }).success, false)
     const { t4Policy: _omitted, ...withoutT4 } = fingerprint
     assert.equal(probeFingerprintSchema.safeParse(withoutT4).success, false)
+    const { baseUrl: _noEndpoint, ...withoutBaseUrl } = fingerprint
+    assert.equal(
+      probeFingerprintSchema.safeParse(withoutBaseUrl).success,
+      false,
+      "the endpoint changes solver behaviour, so it belongs in the contrast",
+    )
+  })
+
+  it("normalises the endpoint so two spellings cannot look like one endpoint", () => {
+    const parsed = probeFingerprintSchema.parse({
+      ...fingerprint,
+      baseUrl: "https://api.synthetic.new/openai/v1/",
+    })
+    assert.equal(parsed.baseUrl, fingerprint.baseUrl)
   })
 })
 
