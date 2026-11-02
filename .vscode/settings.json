@@ -1,0 +1,10 @@
+{
+  "terminal.integrated.shellIntegration.enabled": false,
+  "files.autoSave": "afterDelay",
+  "files.autoSaveDelay": 500,
+  "files.watcherExclude": {
+    "**/.tmp/**": true,
+    "**/.worktrees/**": true,
+    "**/vendor/**": true
+  }
+}
