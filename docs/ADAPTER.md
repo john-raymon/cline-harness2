@@ -232,9 +232,11 @@ order the code does it, and why:
    executes elsewhere and none of the spike evidence describes it. `sessionId` is set to the run id
    *before* starting, because `StartSessionResult.sessionId` only exists once `start()` resolves — and
    `abort()` is needed precisely when it never does.
-5. **`cwd` is the materialised copy.** `cwd` and `workspaceRoot` both point at `<runId>/harness`, so a
-   turn cannot touch the operator's repository or the SSOT. Provisional: c2 decides where a *productive*
-   run works, and that decision needs a policy that does not exist yet.
+5. **`cwd` is the materialised copy — a starting directory, not a fence.** `cwd` and `workspaceRoot`
+   both point at `<runId>/harness`, so a turn *begins* there and a relative path cannot escape it. That
+   is not containment: once a tool is allowed, its arguments are the tool's business, and `run_commands`
+   with an absolute path reaches anywhere the process can. Chunk 7 gates tool *names*; where an allowed
+   tool may act is a sandbox question no chunk has answered. See the containment note in the debt list.
 6. **Tools enabled, then denied.** `enableTools: true` with a default `beforeTool` hook returning
    `{ skip: true }` for every call. `B5.hooks` established that `skip` really prevents the side effect,
    so this is a gate rather than a hint. `yolo: true` only removes the approval prompt a headless run
@@ -302,6 +304,46 @@ over it can never pick up run bookkeeping.
 
 The gate is met by `serves counts from the file, so what a reader sees is what a writer wrote`: a ledger
 is built, finished, re-read from disk and replayed, and the replayed counts are deep-equal to the writer's.
+
+## Tool policy and inventory (Chunk 7)
+
+The inventory is the tree's claim about its own tools; the policy is the run's claim about what it will
+use. Both are inputs to a fingerprint, so both are derived and normalised rather than accepted.
+
+1. **Descriptions are tree files.** `tools/<name>.md`, exactly one level deep. The inventory is built from
+   the tree the session is about to mount — there is no parameter for supplying one — and its hash covers
+   each name plus the digest of its description bytes, so rewriting a description changes
+   `toolInventoryHash`. A nested directory, a non-`.md` file, an empty body or a name that is not
+   lowercase `[a-z][a-z0-9_]{0,63}` is refused before a run directory exists.
+2. **Names are lowercase for a filesystem reason.** A tree can hold `tools/Foo.md` and `tools/foo.md` in
+   memory; materialising that on APFS or NTFS would merge them. Uppercase is refused rather than folded,
+   so the inventory on disk is the inventory that was written.
+3. **A policy is checked against the inventory at parse time.** Naming a tool the tree does not define is
+   `POLICY_UNKNOWN_TOOL`, not dead configuration; a name in both lists is `POLICY_CONFLICT`, not a
+   precedence puzzle. Sorting and de-duplicating at parse time means one policy has exactly one
+   fingerprint.
+4. **Default is deny, and it says so.** `decide` refuses an unlisted tool, refuses an unnamed call, and
+   refuses everything when there is no policy. An empty policy reports the same `default-deny` reason that
+   `["default:deny"]` fingerprints, so the record cannot fingerprint one thing and report another.
+5. **Names match exactly.** Trimming before comparison would let `" run_commands"` match an allowlist entry
+   for `run_commands` — permitting a name nobody wrote. An exact-match miss is a refusal.
+6. **The gate is the policy; there are no caller-supplied hooks.** `bootstrapSession` takes
+   `toolPolicy`, builds `policyHooks`, and records what the gate decided. A caller who could pass arbitrary
+   hooks could run a session whose record claims a policy it never installed, so that parameter is gone.
+7. **`B5.hooks` is required unconditionally.** Every session installs a `beforeTool` gate — deny-all or a
+   policy — and both rest on the claim that `{ skip: true }` really prevents the side effect. The claim gate
+   therefore requires it for every run, and the live children write an evidence fixture for the SDK they
+   actually loaded (`test/support/evidence-fixture.ts`), because `.tmp/spike-evidence.json` is gitignored
+   and a fresh clone has none.
+8. **Record version 2 for the policy.** `toolPolicySet`, `toolInventoryHash` and `toolDecisions` join the
+   probe record. A record that omits the policy in force cannot be compared with another probe: "same
+   result under different permissions" is not the same result. Decisions are capped at 64 and deliberately
+   outside every hash — they are evidence of what happened, not identity.
+
+The gate is met live, in the default `pnpm test`: a scripted provider asks for `run_commands` with a `touch`
+on an absolute path outside the harness copy. Under `allow: [run_commands]` the file appears; under
+`deny: [run_commands]` it does not, and the record carries the refusal. Both runs assert the harness tree is
+unchanged, which is only true because the marker is written outside it.
 
 ## Known debt carried forward
 
@@ -384,5 +426,19 @@ is built, finished, re-read from disk and replayed, and the replayed counts are 
 - **The ledger has no rotation and no size bound.** One file per run, in a run directory that is never
   reused; a long run is a few thousand lines. If that ever stops being true the answer is a new run
   directory, not a truncated file.
+- **The policy gates tool *names*, not what a tool may touch.** `cwd` is where a turn starts, not a fence:
+  an allowed `run_commands` runs with the host process's permissions, and an absolute path in its arguments
+  reaches the operator's repository and the SSOT just as easily as anywhere else. The live gate test leans
+  on exactly that when it writes its marker outside the harness copy. Real confinement needs a sandbox,
+  and until one exists an allow policy is a statement about intent.
+- **`toolDecisions` is capped and excluded from the fingerprint.** 64 entries, in call order, and not part
+  of `toolInventoryHash` or `toolPolicySet`. Two runs with the same policy and different decisions are
+  different *outcomes*, not different probes, so hashing decisions would make every run incomparable.
+- **An empty `tools/` directory means "no tools", not "no policy".** `buildToolInventory` returns an empty
+  inventory for a tree with nothing under `tools/`, and a policy then cannot name anything. A tree that
+  expects tools but ships none fails at `POLICY_UNKNOWN_TOOL`, which is the loud direction.
+- **`B5.hooks` is now a hard dependency of every session.** A machine that has never run `pnpm spike:sdk`
+  cannot start one, even with default-deny tools, because the deny is itself a hook decision. That is the
+  intended fail-closed line; the alternative is trusting an unverified gate.
 
 

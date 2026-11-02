@@ -54,7 +54,10 @@ export function promptSha256(input: {
   })
 }
 
-export function buildBootstrapPrompt(taskPrompt: string): CompiledPrompt {
+export function buildBootstrapPrompt(
+  taskPrompt: string,
+  options: { readonly allowedTools?: readonly string[] } = {},
+): CompiledPrompt {
   if (taskPrompt.trim().length === 0) {
     throw new AdapterError(
       "PROMPT_INVALID",
@@ -62,10 +65,19 @@ export function buildBootstrapPrompt(taskPrompt: string): CompiledPrompt {
     )
   }
   const source: PromptSource = "bootstrap-constant"
+  const allowed = options.allowedTools ?? []
+  const systemPrompt =
+    allowed.length === 0
+      ? BOOTSTRAP_SYSTEM_PROMPT
+      : [
+          "You are the harness bootstrap probe for cline-harness2.",
+          `You may call only these tools: ${[...allowed].sort().join(", ")}.`,
+          "Any other tool call is refused by policy. Answer in text when no tool is needed.",
+        ].join("\n")
   return {
     source,
-    systemPrompt: BOOTSTRAP_SYSTEM_PROMPT,
+    systemPrompt,
     taskPrompt,
-    sha256: promptSha256({ source, systemPrompt: BOOTSTRAP_SYSTEM_PROMPT, taskPrompt }),
+    sha256: promptSha256({ source, systemPrompt, taskPrompt }),
   }
 }

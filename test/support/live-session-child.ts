@@ -15,6 +15,8 @@ import { mkdir } from "node:fs/promises"
 import { join, relative } from "node:path"
 import { isDeepStrictEqual } from "node:util"
 
+import { writeEvidence } from "./evidence-fixture.ts"
+
 const home = process.env["HARNESS2_LIVE_HOME"]
 if (home === undefined || home.length === 0) {
   console.error("HARNESS2_LIVE_HOME is not set; the parent test owns the temporary home directory")
@@ -76,6 +78,11 @@ const provider = await startFakeProvider([{ content: "ok from the live bootstrap
 try {
   await mkdir(join(home, "runs"), { recursive: true })
 
+  // The adapter refuses to start a session without the hook claim in the evidence file, so the child
+  // writes a report for the SDK it actually loaded. A fresh clone has no `.tmp/spike-evidence.json`.
+  const sdkVersion = installedSdkVersion()
+  const evidencePath = await writeEvidence(join(home, "spike-evidence.json"), sdkVersion)
+
   const record = await bootstrapSession({
     config: runConfigSchema.parse({
       k: 1,
@@ -94,9 +101,10 @@ try {
     baseline: { tree: TREE, baselineSha: "b".repeat(64) },
     prompt: buildBootstrapPrompt("Reply with the single word: ok"),
     apiKeySource: "SOLVER_API_KEY",
-    // The tree ships no skills, so the gate has nothing to check and never reads this path.
-    evidencePath: join(home, "unused-evidence.json"),
-    installedSdkVersion: installedSdkVersion(),
+    // The tree ships no skills, but every session installs a `beforeTool` gate, so the hook claim is
+    // required regardless of what the tree contains.
+    evidencePath,
+    installedSdkVersion: sdkVersion,
     rootDir: join(home, "runs"),
     timeoutMs: 90_000,
   })

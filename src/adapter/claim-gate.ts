@@ -20,6 +20,7 @@ import { AdapterError } from "./errors.ts"
 
 export const SPIKE_EVIDENCE_PATH = ".tmp/spike-evidence.json"
 export const SKILLS_CLAIM_ID = "B1.skills"
+export const HOOKS_CLAIM_ID = "B5.hooks"
 export const SKILLS_TREE_PREFIX = ".cline/skills/"
 
 /**
@@ -59,13 +60,26 @@ export interface ClaimGateReport {
  * so a tree that ships skills depends on `B1.skills` — the claim that establishes discovery happens at
  * all and that an allowlist is not the gate. A tree without skills depends on nothing.
  */
+/**
+ * Claims a session started from this tree cannot do without.
+ *
+ * `B5.hooks` is unconditional: every bootstrap installs a `beforeTool` gate — deny-all or a policy — and
+ * both rest on the claim that a `{ skip: true }` decision really prevents a tool's side effect. An
+ * option to leave it out would be an option to start a session whose gate is unverified.
+ *
+ * Mounting the tree as the session's working directory is what makes `<cwd>/.cline/skills` visible, so a
+ * tree that ships skills also depends on `B1.skills` — the claim that discovery happens at all and that
+ * an allowlist is not the gate.
+ */
 export function requiredClaimsFor(tree: HarnessTree): readonly string[] {
+  const claims: string[] = [HOOKS_CLAIM_ID]
   for (const key of Object.keys(tree)) {
     if (key.startsWith(SKILLS_TREE_PREFIX) && key.length > SKILLS_TREE_PREFIX.length) {
-      return [SKILLS_CLAIM_ID]
+      claims.push(SKILLS_CLAIM_ID)
+      break
     }
   }
-  return []
+  return claims
 }
 
 export async function assertClaimsSatisfied(input: ClaimGateInput): Promise<ClaimGateReport> {

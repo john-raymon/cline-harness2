@@ -2,6 +2,15 @@ import { z } from "zod"
 
 import { API_KEY_ENV_CHAIN, type ApiKeySource } from "../config.ts"
 import { sha256HexSchema, type HarnessTree, type RunConfig } from "../domain/schemas.ts"
+import { policyHooks } from "../policy/hooks.ts"
+import { buildToolInventory } from "../policy/inventory.ts"
+import {
+  parseToolPolicy,
+  toolDecisionSchema,
+  toolPolicySetOf,
+  type ToolDecision,
+  type ToolPolicyInput,
+} from "../policy/policy.ts"
 import { assertClaimsSatisfied, requiredClaimsFor } from "./claim-gate.ts"
 import { AdapterError } from "./errors.ts"
 import { PROMPT_SOURCES, type CompiledPrompt } from "./prompt.ts"
@@ -26,6 +35,8 @@ export const DEFAULT_MAX_ITERATIONS = 2
 const MAX_TIMEOUT_MS = 2_147_483_647
 /** Distinct event types kept on the record. Streaming deltas are many; their *types* are few. */
 export const MAX_EVENT_TYPES = 128
+/** Tool decisions kept on the record. A session that calls more tools than this is not a probe. */
+export const MAX_TOOL_DECISIONS = 64
 
 export const API_KEY_SOURCES = [
   "--api-key",
@@ -73,8 +84,13 @@ export interface SessionBootstrapInput {
   readonly runId?: string
   readonly timeoutMs?: number
   readonly signal?: AbortSignal
-  /** Overrides the deny-all default. Chunk 7 supplies the real policy. */
-  readonly hooks?: unknown
+  /**
+   * What this session may call. Omitted means default-deny.
+   *
+   * There is deliberately no `hooks` parameter: the gate *is* the policy, and a caller who could pass
+   * arbitrary hooks could run a session whose record claims a policy it never installed.
+   */
+  readonly toolPolicy?: ToolPolicyInput
   readonly maxIterations?: number
   readonly deps?: SessionDeps
 }
@@ -86,7 +102,7 @@ export interface SessionBootstrapInput {
  * hashes means a record cannot be hand-written into looking valid.
  */
 export const sessionBootstrapRecordSchema = z.strictObject({
-  version: z.literal(1),
+  version: z.literal(2),
   runId: z.string().min(1),
   runDir: z.string().min(1),
   harnessDir: z.string().min(1),
@@ -98,6 +114,16 @@ export const sessionBootstrapRecordSchema = z.strictObject({
   apiKeySource: z.enum(API_KEY_SOURCES),
   promptSource: z.enum(PROMPT_SOURCES),
   promptSha256: sha256HexSchema,
+  /**
+   * The policy the session actually ran under, and the inventory it was checked against.
+   *
+   * Version 2 exists for these three fields: a probe record that omits the policy in force cannot be
+   * compared with another probe, because "same result under different permissions" is not the same
+   * result. `default:deny` is recorded explicitly rather than as an empty list.
+   */
+  toolPolicySet: z.array(z.string().min(1)),
+  toolInventoryHash: sha256HexSchema,
+  toolDecisions: z.array(toolDecisionSchema).max(MAX_TOOL_DECISIONS),
   eventCount: z.int().nonnegative(),
   eventTypes: z.array(z.string().min(1)),
   turns: z.int().nonnegative(),
@@ -145,6 +171,19 @@ export async function bootstrapSession(
     DEFAULT_TEARDOWN_TIMEOUT_MS,
     "teardownTimeoutMs",
   )
+
+  // The inventory is derived from the tree this session will mount, and validated before anything is
+  // created: a malformed `tools/` directory is a reason not to make a run directory at all.
+  const inventory = buildToolInventory(input.baseline.tree)
+  const policy = input.toolPolicy === undefined ? undefined : parseToolPolicy(input.toolPolicy, inventory)
+  const toolPolicySet = toolPolicySetOf(policy)
+  const toolDecisions: ToolDecision[] = []
+  const hooks = policyHooks({
+    policy,
+    onDecision: (decision) => {
+      if (toolDecisions.length < MAX_TOOL_DECISIONS) toolDecisions.push(decision)
+    },
+  })
 
   const apiKey = input.config.apiKey
   if (apiKey === undefined || apiKey.trim().length === 0) {
@@ -212,7 +251,7 @@ export async function bootstrapSession(
           prompt: input.prompt,
           config: input.config,
           maxIterations: input.maxIterations ?? DEFAULT_MAX_ITERATIONS,
-          hooks: input.hooks ?? denyAllToolHooks(),
+          hooks,
         }),
       },
       timeoutMs,
@@ -224,7 +263,7 @@ export async function bootstrapSession(
     const durationMs = Math.max(0, Math.round(now().getTime() - startedAt.getTime()))
 
     const record = {
-      version: 1,
+      version: 2,
       runId,
       runDir: prepared.runDir,
       harnessDir: prepared.harnessDir,
@@ -236,6 +275,9 @@ export async function bootstrapSession(
       apiKeySource: input.apiKeySource,
       promptSource: input.prompt.source,
       promptSha256: input.prompt.sha256,
+      toolPolicySet,
+      toolInventoryHash: inventory.hash,
+      toolDecisions,
       eventCount,
       eventTypes,
       turns: result.turns,
@@ -359,12 +401,15 @@ function parseStartResult(raw: unknown, runId: string): StartResult {
 /**
  * The start payload.
  *
- * `cwd` and `workspaceRoot` both point at the materialised copy, so anything the runtime or a tool
- * touches stays inside a directory this run created. `checkpoint` is switched off explicitly rather
- * than relying on its default, because a future SDK flipping that default would start taking git
- * stash refs in the operator's repository. `yolo` is safe here only because `beforeTool` denies every
- * tool: the hook is the gate, and `yolo` merely stops a headless run from waiting on an approval
- * dialog nobody will ever see.
+ * `cwd` and `workspaceRoot` both point at the materialised copy, so a turn *starts* inside a directory
+ * this run created and a relative path has nowhere else to go. That is not containment: an allowed tool
+ * sees the arguments it is given, and a command with an absolute path reaches whatever the process can.
+ * Chunk 7's policy gates which tool may run, not what an allowed tool may touch — confinement is a
+ * sandbox question and no chunk has answered it.
+ *
+ * `checkpoint` is switched off explicitly rather than relying on its default, because a future SDK
+ * flipping that default would start taking git stash refs in the operator's repository. `yolo: true`
+ * only stops a headless run from waiting on an approval dialog nobody will see; `beforeTool` is the gate.
  */
 function sessionConfig(input: {
   runId: string
@@ -395,22 +440,13 @@ function sessionConfig(input: {
 }
 
 /**
- * Fail-closed default for Chunk 5.
+ * Fail-closed default, expressed as the policy module's own hook.
  *
- * `B5.hooks` established that `{ skip: true }` from `beforeTool` really prevents the side effect, so
- * this is a gate rather than a suggestion. Chunk 7 replaces it with the tree's actual policy.
+ * `B5.hooks` established that `{ skip: true }` from `beforeTool` really prevents the side effect, so a
+ * session's gate is a decision and not a suggestion. There is no standalone deny-all hook any more:
+ * `policyHooks({ policy: undefined })` denies every named tool and records the refusal, so the default
+ * path and the policy path produce the same kind of evidence.
  */
-export function denyAllToolHooks(): {
-  beforeTool: (context: unknown) => { skip: true; appendContext: string }
-} {
-  return {
-    beforeTool: () => ({
-      skip: true,
-      appendContext:
-        "harness2 bootstrap: tool execution is disabled for this session until the tool policy lands",
-    }),
-  }
-}
 
 function eventTypeOf(event: unknown): string | null {
   if (typeof event !== "object" || event === null) return null

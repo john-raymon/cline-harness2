@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises"
 import { afterEach, describe, it } from "node:test"
 import os from "node:os"
 import path from "node:path"
@@ -12,12 +12,13 @@ import {
   DEFAULT_MAX_ITERATIONS,
   MAX_EVENT_TYPES,
   bootstrapSession,
-  denyAllToolHooks,
   sessionBootstrapRecordSchema,
   type SessionBootstrapInput,
   type SdkSlice,
 } from "../src/adapter/session.ts"
 import { readTree } from "../src/harness/tree-store.ts"
+import { PolicyError } from "../src/policy/errors.ts"
+import { writeEvidence } from "./support/evidence-fixture.ts"
 
 const scratchRoots: string[] = []
 
@@ -45,6 +46,8 @@ interface FakeScript {
   readonly subscribeError?: Error
   readonly unsubscribeError?: Error
   readonly createValue?: unknown
+  /** Tool names the fake "model" tries to call during the turn, so the gate is exercised in-session. */
+  readonly toolCalls?: readonly string[]
 }
 
 interface FakeState {
@@ -91,6 +94,14 @@ function fakeSdk(script: FakeScript = {}): FakeSdk {
     async start(input: Record<string, unknown>): Promise<unknown> {
       state.started = true
       state.startInput = input
+      // Mirror the SDK: the gate is consulted while the turn runs, not before it starts. Decisions made
+      // here are the ones a probe record should carry.
+      const config = input["config"] as
+        | { hooks?: { beforeTool?: (context: unknown) => unknown } }
+        | undefined
+      for (const name of script.toolCalls ?? []) {
+        config?.hooks?.beforeTool?.({ toolCall: { name } })
+      }
       for (const event of script.events ?? []) listener?.(event)
       return script.start === undefined ? DEFAULT_RESULT : await script.start()
     },
@@ -160,16 +171,25 @@ function clock(): () => Date {
 async function inputWith(
   overrides: Partial<SessionBootstrapInput> & { rootDir: string },
 ): Promise<SessionBootstrapInput> {
+  // Every session installs a `beforeTool` gate, so the claim gate now requires B5.hooks; without a
+  // report every one of these tests would fail on evidence rather than on what it is testing.
+  await mkdir(overrides.rootDir, { recursive: true })
+  const evidencePath = await writeEvidence(path.join(overrides.rootDir, "spike-evidence.json"))
   return {
     config: configWith(),
     baseline: { tree: TREE, baselineSha: BASELINE_SHA },
     prompt: buildBootstrapPrompt("Say ok"),
     apiKeySource: "SOLVER_API_KEY",
-    evidencePath: path.join(overrides.rootDir, "absent-evidence.json"),
+    evidencePath,
     installedSdkVersion: "0.2.0",
     runId: RUN_ID,
     ...overrides,
   }
+}
+
+/** Everything in a run root except the evidence report every input has to write there. */
+async function runEntries(root: string): Promise<string[]> {
+  return (await readdir(root)).filter((entry) => entry !== "spike-evidence.json").sort()
 }
 
 async function codeOf(operation: Promise<unknown>): Promise<string> {
@@ -222,13 +242,16 @@ describe("pre-flight", () => {
         bootstrapSession({
           ...(await inputWith({ rootDir: root })),
           baseline: { tree, baselineSha: BASELINE_SHA },
+          // A session with a hook gate and a skill has two claims to check, and no report to check them
+          // against: that is a reason not to start at all.
+          evidencePath: path.join(root, "absent-evidence.json"),
           deps: { loadSdk: fake.loadSdk },
         }),
       ),
       "SPIKE_EVIDENCE_MISSING",
     )
     // No run directory, no SDK load: an unverifiable dependency is a reason not to start at all.
-    assert.deepEqual(await readdir(root), [])
+    assert.deepEqual(await runEntries(root), [])
     assert.equal(fake.state.loaded, false)
   })
 
@@ -239,7 +262,13 @@ describe("pre-flight", () => {
     const evidencePath = path.join(root, "evidence.json")
     await writeFile(
       evidencePath,
-      JSON.stringify({ sdkVersion: "0.2.0", claims: [{ id: "B1.skills", status: "verified" }] }),
+      JSON.stringify({
+        sdkVersion: "0.2.0",
+        claims: [
+          { id: "B1.skills", status: "verified" },
+          { id: "B5.hooks", status: "verified" },
+        ],
+      }),
       "utf8",
     )
 
@@ -460,22 +489,68 @@ describe("the start payload", () => {
     }
     const verdict = hooks.beforeTool({ toolCall: { name: "run_commands" } })
     assert.equal(verdict.skip, true)
-    assert.match(verdict.appendContext, /disabled/)
+    // The default-deny reason is recorded verbatim, so "no policy" is distinguishable from "denied".
+    assert.match(verdict.appendContext, /default-deny/)
   })
 
-  it("accepts a caller-supplied hook and iteration budget", async () => {
+  it("records the policy it ran under and lets an allowed tool through", async () => {
     const root = await scratch()
-    const fake = fakeSdk()
-    const hooks = { beforeTool: () => undefined }
-    await bootstrapSession({
+    const fake = fakeSdk({ toolCalls: ["run_commands", "write_to_file"] })
+    const tree: HarnessTree = { ...TREE, "tools/run_commands.md": "Run shell commands.\n" }
+    const record = await bootstrapSession({
       ...(await inputWith({ rootDir: root })),
-      hooks,
+      baseline: { tree, baselineSha: BASELINE_SHA },
+      toolPolicy: { allow: ["run_commands"], deny: [] },
       maxIterations: 4,
       deps: { loadSdk: fake.loadSdk },
     })
+
     const config = fake.state.startInput?.["config"] as Record<string, unknown>
-    assert.equal(config["hooks"], hooks)
     assert.equal(config["maxIterations"], 4)
+    assert.deepEqual(record.toolPolicySet, ["allow:run_commands"])
+    assert.equal(record.toolInventoryHash.length, 64)
+    // Decisions come from the turn itself, so the record says what the gate actually did.
+    assert.deepEqual(
+      record.toolDecisions.map((decision) => [decision.toolName, decision.verdict, decision.reason]),
+      [
+        ["run_commands", "allow", "allowed"],
+        ["write_to_file", "deny", "not-allowed"],
+      ],
+    )
+
+    const hooks = config["hooks"] as { beforeTool: (context: unknown) => unknown }
+    assert.equal(hooks.beforeTool({ toolCall: { name: "run_commands" } }), undefined)
+    const refused = hooks.beforeTool({ toolCall: { name: "write_to_file" } }) as { skip: boolean }
+    assert.equal(refused.skip, true)
+  })
+
+  it("refuses a policy that names a tool the tree does not define", async () => {
+    const root = await scratch()
+    // Dead configuration is an error: a policy naming `nope` would run as an allowlist that permits
+    // nothing while the operator believes it permits `nope`.
+    await assert.rejects(
+      bootstrapSession({
+        ...(await inputWith({ rootDir: root })),
+        toolPolicy: { allow: ["nope"], deny: [] },
+        deps: { loadSdk: fakeSdk().loadSdk },
+      }),
+      (error: unknown) => error instanceof PolicyError && error.code === "POLICY_UNKNOWN_TOOL",
+    )
+    assert.deepEqual(await runEntries(root), [], "a rejected policy must not create a run directory")
+  })
+
+  it("refuses a malformed tools directory before creating anything", async () => {
+    const root = await scratch()
+    const tree: HarnessTree = { ...TREE, "tools/nested/skill.md": "not a tool\n" }
+    await assert.rejects(
+      bootstrapSession({
+        ...(await inputWith({ rootDir: root })),
+        baseline: { tree, baselineSha: BASELINE_SHA },
+        deps: { loadSdk: fakeSdk().loadSdk },
+      }),
+      (error: unknown) => error instanceof PolicyError && error.code === "TOOL_INVENTORY_INVALID",
+    )
+    assert.deepEqual(await runEntries(root), [])
   })
 
   it("accepts every API key source the config can report", () => {
@@ -553,7 +628,7 @@ describe("timeouts and teardown bounds", () => {
       )
     }
     // Node would have turned every one of those into a ~1ms timer, aborting the session instantly.
-    assert.deepEqual(await readdir(root), [])
+    assert.deepEqual(await runEntries(root), [])
     assert.equal(fake.state.loaded, false)
   })
 
