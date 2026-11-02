@@ -1,0 +1,173 @@
+import { z } from "zod"
+
+import { sha256HexSchema } from "../domain/schemas.ts"
+
+/**
+ * The `LedgerEvent` schema Chunk 1 deliberately deferred to its owner.
+ *
+ * One event per line of JSONL, and every event carries its own position: `seq` is contiguous from 1
+ * and `at` is the moment the *writer* accepted it, not the caller's idea of time. A record whose
+ * ordering has to be inferred from file order is a record that cannot be checked, and checking it is
+ * the entire point — `4k` executions and `3k` improvements have to be countable by a reader that was
+ * not there when they happened.
+ *
+ * Every member is a `strictObject`: an unknown field means the writer and the reader disagree about
+ * what a run is, and silently dropping it would make two different runs replay identically.
+ */
+
+export const LEDGER_EVENT_VERSION = 1
+
+/** Exactly what `Date.prototype.toISOString` emits, so a stored instant always round-trips. */
+const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
+
+/**
+ * Identifiers are bounded and shell-safe.
+ *
+ * They reach filenames, log lines and operator-facing messages, so a newline or a quote here is a
+ * log-injection primitive rather than a cosmetic problem.
+ */
+export const ledgerIdSchema = z
+  .string()
+  .regex(
+    /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/,
+    "must be 1–128 characters of [A-Za-z0-9._:-] and must start with an alphanumeric",
+  )
+
+export const EXECUTION_OUTCOMES = ["pass", "fail", "error"] as const
+export const executionOutcomeSchema = z.enum(EXECUTION_OUTCOMES)
+export type ExecutionOutcome = z.infer<typeof executionOutcomeSchema>
+
+/**
+ * The four oracle stages, in pipeline order.
+ *
+ * Ordered on purpose: `byStage` is reported in this order, so a replay summary does not depend on
+ * which stage happened to run first.
+ */
+export const IMPROVEMENT_STAGES = ["improver", "composer", "selector", "reflector"] as const
+export const improvementStageSchema = z.enum(IMPROVEMENT_STAGES)
+export type ImprovementStage = z.infer<typeof improvementStageSchema>
+
+export const IMPROVEMENT_OUTCOMES = ["accepted", "rejected", "error"] as const
+export const improvementOutcomeSchema = z.enum(IMPROVEMENT_OUTCOMES)
+export type ImprovementOutcome = z.infer<typeof improvementOutcomeSchema>
+
+/**
+ * Why a physical attempt happened.
+ *
+ * `initial` is not optional detail: without it ordinary runs record zero attempts, because every
+ * attempt would be a retry of something. Attempts are the physical cost — tokens spent, provider
+ * calls made — and they never move the logical `4k`/`3k` counters.
+ */
+export const ATTEMPT_REASONS = ["initial", "retry", "schema-repair", "oracle-substitution"] as const
+export const attemptReasonSchema = z.enum(ATTEMPT_REASONS)
+export type AttemptReason = z.infer<typeof attemptReasonSchema>
+
+export const RUN_OUTCOMES = ["completed", "halted", "failed"] as const
+export const runOutcomeSchema = z.enum(RUN_OUTCOMES)
+export type RunOutcome = z.infer<typeof runOutcomeSchema>
+
+const envelope = {
+  version: z.literal(LEDGER_EVENT_VERSION),
+  /** Contiguous from 1. A gap means a line was lost or written elsewhere. */
+  seq: z.int().positive(),
+  at: z.string().regex(ISO_INSTANT, "expected an ISO-8601 instant with milliseconds and a Z suffix"),
+}
+
+/**
+ * The first event, and the only one that may start a run.
+ *
+ * `toolPolicySet` and `toolInventoryHash` are caller-supplied identity, exactly like `baselineSha`:
+ * this module records the policy a run used, it does not compute one. `probeSha` is the digest of the
+ * persisted probe artifact's bytes, or `null` when the run never wrote one — deliberately not a
+ * `ProbeFingerprint`, which carries no paths and no timings and is composed in Chunks 7–8.
+ */
+const runStartedEventSchema = z.strictObject({
+  ...envelope,
+  kind: z.literal("run.started"),
+  runId: ledgerIdSchema,
+  baselineSha: sha256HexSchema,
+  probeSha: sha256HexSchema.nullable(),
+  providerId: z.string().min(1),
+  modelId: z.string().min(1),
+  baseUrl: z.string().min(1),
+  promptSha256: sha256HexSchema,
+  toolPolicySet: z.array(z.string().min(1)),
+  toolInventoryHash: sha256HexSchema,
+  k: z.int().positive(),
+})
+
+const executionStartedEventSchema = z.strictObject({
+  ...envelope,
+  kind: z.literal("execution.started"),
+  executionId: ledgerIdSchema,
+  taskId: ledgerIdSchema,
+})
+
+const executionFinishedEventSchema = z.strictObject({
+  ...envelope,
+  kind: z.literal("execution.finished"),
+  executionId: ledgerIdSchema,
+  outcome: executionOutcomeSchema,
+})
+
+const improvementStartedEventSchema = z.strictObject({
+  ...envelope,
+  kind: z.literal("improvement.started"),
+  improvementId: ledgerIdSchema,
+  stage: improvementStageSchema,
+})
+
+const improvementFinishedEventSchema = z.strictObject({
+  ...envelope,
+  kind: z.literal("improvement.finished"),
+  improvementId: ledgerIdSchema,
+  outcome: improvementOutcomeSchema,
+})
+
+const attemptRecordedEventSchema = z.strictObject({
+  ...envelope,
+  kind: z.literal("attempt.recorded"),
+  attemptId: ledgerIdSchema,
+  of: z.enum(["execution", "improvement"]),
+  targetId: ledgerIdSchema,
+  reason: attemptReasonSchema,
+})
+
+const runFinishedEventSchema = z.strictObject({
+  ...envelope,
+  kind: z.literal("run.finished"),
+  outcome: runOutcomeSchema,
+  /**
+   * Totals as the writer counted them. Replay re-derives these from the events themselves and refuses
+   * a mismatch, so a hand-written summary cannot disagree with the record it summarises.
+   */
+  executions: z.int().nonnegative(),
+  improvements: z.int().nonnegative(),
+  physicalAttempts: z.int().nonnegative(),
+})
+
+export const ledgerEventSchema = z.discriminatedUnion("kind", [
+  runStartedEventSchema,
+  executionStartedEventSchema,
+  executionFinishedEventSchema,
+  improvementStartedEventSchema,
+  improvementFinishedEventSchema,
+  attemptRecordedEventSchema,
+  runFinishedEventSchema,
+])
+
+export type LedgerEvent = z.infer<typeof ledgerEventSchema>
+
+type EnvelopeKey = "version" | "seq" | "at"
+
+/** What a caller hands to `append`; the writer owns the envelope. */
+export type LedgerEventInput =
+  | Omit<z.infer<typeof runStartedEventSchema>, EnvelopeKey>
+  | Omit<z.infer<typeof executionStartedEventSchema>, EnvelopeKey>
+  | Omit<z.infer<typeof executionFinishedEventSchema>, EnvelopeKey>
+  | Omit<z.infer<typeof improvementStartedEventSchema>, EnvelopeKey>
+  | Omit<z.infer<typeof improvementFinishedEventSchema>, EnvelopeKey>
+  | Omit<z.infer<typeof attemptRecordedEventSchema>, EnvelopeKey>
+  | Omit<z.infer<typeof runFinishedEventSchema>, EnvelopeKey>
+
+export type RunStartedEvent = z.infer<typeof runStartedEventSchema>

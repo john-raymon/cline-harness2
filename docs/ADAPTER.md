@@ -260,6 +260,49 @@ Verification is live, not mocked: the test spawns `test/support/live-session-chi
 latches its SQLite location at import), runs one turn against `test/support/fake-provider.ts`, and prints
 one JSON line that the parent validates with the same zod schema the adapter returns.
 
+## Ledger and artifact store (Chunk 6)
+
+`<runDir>/ledger.jsonl` is the run's record and `<runDir>/artifacts/probe.json` is its probe evidence.
+The harness directory is untouched by both — `run-dir.ts` reserved it for the tree so that `readTree`
+over it can never pick up run bookkeeping.
+
+1. **One writer, one order.** `RunLedger.open` claims `<runDir>/ledger.lock` with `wx`; a second open is
+   `LEDGER_LOCKED` rather than a race between two writers allocating the same `seq`. Appends run through
+   an internal queue, so sequence allocation, the budget check, the dry-run and the write happen in one
+   turn even when fifty callers append at once. Admission is checked when work is *submitted* and the
+   queue is drained on close, so an append already accepted is never lost to a shutdown that started a
+   microtask later; `close()` is one memoised teardown, so two shutdown paths cannot race over the lock.
+2. **Counts move only on `*.finished`.** `4k` executions and `3k` improvements are derived from terminal
+   events; `attempt.recorded` is the cost line (retries, schema repairs, oracle substitutions) and never
+   touches them. `byStage` is reported in pipeline order so two equivalent runs summarise identically.
+3. **Budget is reserved on `*.started`, and enforced again in replay.** Checking on finish would admit
+   more work than the budget and then refuse to record it, stranding an operation that already spent
+   tokens. The fifth start of a `4k` budget fails before the cost, and finishing admitted work is always
+   allowed afterwards. Replay applies the same limit using the `k` recorded in `run.started`, so a file
+   that was edited or written by an older build is refused rather than reported as a run that broke its
+   own contract.
+4. **The file never contains an event replay would refuse.** Every append dry-runs `replayLedger` over the
+   whole history first, so a gapped `seq`, a duplicate id, an orphan attempt or a mismatched
+   `run.finished` summary is rejected before any byte is written. A refused append leaves the file
+   byte-identical.
+5. **`run.finished` is terminal, single, and self-checking.** It carries the totals it was written from,
+   and replay re-derives them from the events and refuses a disagreement; `completed` is refused while any
+   operation is open, while `failed`/`halted` may record those ids honestly. Finishing is separate from
+   `close()`, which only drains and releases the handle and lock.
+6. **A torn tail is an error, not a lost line.** `readLedgerFile` refuses a file that does not end in a
+   newline (`LEDGER_TRUNCATED`, with the line number) rather than dropping the half-written event — a run
+   that lost its closing events must not look like a run that had fewer. A corrupt line *before* the tail
+   is `LEDGER_CORRUPT` with its line number and byte offset.
+7. **A writer that failed mid-append is poisoned.** It cannot know what reached the disk, so it refuses
+   further work instead of appending a `seq` that may already exist.
+8. **Probe artifacts are published once, claim-then-rename.** `rename` replaces silently, so an existence
+   check alone would let two publishers both "win"; an exclusive `.probe.claim` turns "refuse to
+   overwrite" into a decision. The returned digest is the digest of the file's bytes, verified by reading
+   it back, and the record is written as canonical JSON so the same record always hashes the same.
+
+The gate is met by `serves counts from the file, so what a reader sees is what a writer wrote`: a ledger
+is built, finished, re-read from disk and replayed, and the replayed counts are deep-equal to the writer's.
+
 ## Known debt carried forward
 
 - **The tree store assumes it owns the directory.** `materialiseTree` claims a non-existent leaf with
@@ -326,5 +369,20 @@ one JSON line that the parent validates with the same zod schema the adapter ret
 - **`@cline/sdk`'s own `dist/index.d.ts` is a one-line re-export.** The real session surface lives in
   `@cline/core`, so reading it means `.pnpm/@cline+core@*/node_modules/@cline/core/dist`, not
   `node_modules/@cline/sdk/dist`.
+- **A stale ledger lock is never cleared automatically.** A run that dies mid-record leaves
+  `<runDir>/ledger.lock` behind, and the next attempt reports `LEDGER_LOCKED`. That is deliberate —
+  clearing it for the operator would also clear it for a run that is still writing — so recovery is an
+  explicit `rm` after confirming the process is gone.
+- **Ledger integrity is a filesystem property, not a cryptographic one.** `seq`/`at` are writer-assigned
+  and the lock keeps a second *writer* out, but nothing stops a second process from editing the file
+  between runs. Detecting that would need a chained digest, which no chunk has required yet.
+- **`toolPolicySet`/`toolInventoryHash` in `run.started` are caller-supplied identity.** Chunk 6 records
+  what the caller says the policy was; nothing yet verifies it against the tree. Chunk 7 supplies both
+  from the same computed snapshot, and only then does the field mean what it looks like it means.
+- **`probeSha` is the artifact's byte digest, not a fingerprint.** It identifies the file an operator can
+  open. `ProbeFingerprint` composition stays in Chunks 7–8, because it must carry no paths and no timings.
+- **The ledger has no rotation and no size bound.** One file per run, in a run directory that is never
+  reused; a long run is a few thousand lines. If that ever stops being true the answer is a new run
+  directory, not a truncated file.
 
 
