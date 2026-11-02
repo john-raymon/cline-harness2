@@ -1,10 +1,11 @@
 {
   "name": "cline-harness2",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "Faithful TypeScript port of Google Research Harness^2 (arXiv:2610.14224) with T4 context management (arXiv:2609.20804) on top of @cline/sdk",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "node --import tsx --test test/*.test.ts",
+    "spike:sdk": "node --import tsx spikes/sdk.ts"
   },
   "keywords": [],
   "author": "",
