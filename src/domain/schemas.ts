@@ -24,10 +24,56 @@ const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/
 const DRIVE_PREFIX = /^[A-Za-z]:$/
 
 /** Reserved device names are unopenable on Windows and silently resolve to devices. */
-const RESERVED_DEVICE_NAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i
+const RESERVED_DEVICE_NAME = /^(con|prn|aux|nul|com[1-9\u00b9\u00b2\u00b3]|lpt[1-9\u00b9\u00b2\u00b3])(\..*)?$/i
 
 /** `NAME_MAX` on ext4 and APFS. */
 const SEGMENT_MAX_BYTES = 255
+
+/** Illegal in a Windows filename; a tree that only works on one OS is not a harness. */
+const WINDOWS_ILLEGAL_PUNCTUATION = /[<>:"|?*]/
+
+/**
+ * Well-formed UTF-16: every surrogate is half of a valid pair.
+ *
+ * `String.prototype.isWellFormed` is ES2024 and this project targets ES2023, so the scan is local.
+ * It matters because V8 writes an unpaired surrogate as `U+FFFD`, which silently changes the bytes
+ * and breaks every round-trip and hash in the system.
+ */
+export function isWellFormedText(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const unit = value.charCodeAt(index)
+    if (unit < 0xd800 || unit > 0xdfff) continue
+    if (unit > 0xdbff) return false
+    const next = value.charCodeAt(index + 1)
+    if (!(next >= 0xdc00 && next <= 0xdfff)) return false
+    index += 1
+  }
+  return true
+}
+
+const WELL_FORMED_MESSAGE =
+  "must be well-formed UTF-16; an unpaired surrogate is written to disk as U+FFFD and cannot round-trip"
+
+/**
+ * Policy limits for a harness tree, shared by the writer and the reader so both enforce one policy.
+ *
+ * These are defaults, not measurements: a harness is prompt/markdown/config files, and 8 MiB of
+ * UTF-8 text is roughly 4M tokens, far past any budget this harness will ever use.
+ */
+export const TREE_LIMITS = {
+  maxFiles: 1024,
+  maxFileBytes: 1_048_576,
+  maxTotalBytes: 8_388_608,
+  /** Files plus implied directories; bounds traversal through empty-directory forests. */
+  maxEntries: 4096,
+} as const
+
+/** Text that may be stored as one file body. */
+export const fileBodySchema = z.string().superRefine((value, ctx) => {
+  if (!isWellFormedText(value)) {
+    ctx.addIssue({ code: "custom", message: `file body ${WELL_FORMED_MESSAGE}` })
+  }
+})
 
 /**
  * A normalised relative POSIX path, as used for every key of a harness tree.
@@ -46,6 +92,7 @@ export const relPathSchema = z.string().superRefine((value, ctx) => {
   }
   if (value.includes("\\")) return reject("path must use POSIX separators; found a backslash")
   if (value.includes("\0")) return reject("path must not contain a NUL byte")
+  if (!isWellFormedText(value)) return reject(`path ${WELL_FORMED_MESSAGE}`)
   if (value !== value.normalize("NFC")) {
     return reject("path must be NFC-normalised; a decomposed form collides on macOS file systems")
   }
@@ -65,6 +112,12 @@ export const relPathSchema = z.string().superRefine((value, ctx) => {
     if (DRIVE_PREFIX.test(segment)) {
       return reject(`path segment ${segment} looks like a Windows drive prefix`)
     }
+    if (WINDOWS_ILLEGAL_PUNCTUATION.test(segment)) {
+      return reject(
+        `path segment ${segment} contains a character that is illegal in a Windows filename ` +
+          "(one of < > : \" | ? *)",
+      )
+    }
     if (segment.endsWith(".")) {
       return reject("path segments must not end with a dot; such names are unopenable on Windows")
     }
@@ -83,31 +136,168 @@ export const relPathSchema = z.string().superRefine((value, ctx) => {
 export type RelPath = z.infer<typeof relPathSchema>
 
 /** The editable harness: relative path -> file body. */
-export const harnessTreeSchema = z.record(relPathSchema, z.string())
+export const harnessTreeSchema = z.record(relPathSchema, fileBodySchema)
 export type HarnessTree = z.infer<typeof harnessTreeSchema>
 
 /**
  * An edit proposal over a harness tree.
  *
- * Contract, mirroring the upstream read-back semantics: an omitted path inherits its current body,
- * and `""` overwrites it with an empty file. Deletion is NOT expressible here — upstream expresses
- * it by removing the file from the on-disk workspace and reading the directory back, which is what
- * the evidence builder does after an oracle session.
+ * Three-valued, mirroring how the upstream workspace behaves: an omitted path inherits its current
+ * body, `""` overwrites it with an empty file, and `null` removes it. Deletion is expressed here
+ * rather than by touching the disk, so a patch is a value that can be diffed, hashed and replayed.
  */
-export const treePatchSchema = z.record(relPathSchema, z.string())
+export const treePatchSchema = z.record(relPathSchema, fileBodySchema.nullable())
 export type TreePatch = z.infer<typeof treePatchSchema>
 
-/** Apply a patch to a tree, returning a new tree. Omitted keys inherit; `""` overwrites. */
+/**
+ * Apply a patch to a tree, returning a new tree. Omitted keys inherit; `""` empties; `null` deletes.
+ *
+ * Deleting a path that is not present is a no-op rather than an error: patches get composed and
+ * replayed, so the algebra has to stay idempotent. An oracle edit that deletes nothing it meant to
+ * has to be caught by a validator, not by making this function throw.
+ */
 export function applyTreePatch(base: HarnessTree, patch: TreePatch): HarnessTree {
-  return { ...base, ...patch }
+  const next: HarnessTree = { ...base }
+  for (const [path, body] of Object.entries(patch)) {
+    if (body === null) delete next[path]
+    else next[path] = body
+  }
+  return next
 }
 
-/** Paths the patch changes relative to `base` (added, modified or blanked). */
+/** Paths the patch changes relative to `base` (added, modified, blanked or deleted). */
 export function changedPaths(base: HarnessTree, patch: TreePatch): string[] {
   return Object.entries(patch)
-    .filter(([path, body]) => base[path] !== body)
+    // `Object.hasOwn`, not `in`: a path may legally be named `toString`, and `"toString" in {}` is
+    // true through `Object.prototype`, which would report deleting a file that never existed.
+    .filter(([path, body]) =>
+      body === null
+        ? Object.hasOwn(base, path)
+        : !Object.hasOwn(base, path) || base[path] !== body,
+    )
     .map(([path]) => path)
     .sort()
+}
+
+export interface TreeDiff {
+  readonly added: readonly string[]
+  readonly modified: readonly string[]
+  readonly removed: readonly string[]
+}
+
+/**
+ * Compare two trees over the union of their keys.
+ *
+ * `changedPaths` compares a *patch*, so it cannot see a removal: the removed key is simply absent
+ * from the patch. A read-back workspace has to be diffed as before/after trees, which is this.
+ */
+export function diffTrees(before: HarnessTree, after: HarnessTree): TreeDiff {
+  const added: string[] = []
+  const modified: string[] = []
+  const removed: string[] = []
+  const keys = [...new Set([...Object.keys(before), ...Object.keys(after)])].sort()
+  for (const key of keys) {
+    // Ownership, not presence-by-prototype: `toString` and friends are legal filenames.
+    const hadBefore = Object.hasOwn(before, key)
+    const hasAfter = Object.hasOwn(after, key)
+    if (!hadBefore) added.push(key)
+    else if (!hasAfter) removed.push(key)
+    else if (before[key] !== after[key]) modified.push(key)
+  }
+  return { added, modified, removed }
+}
+
+export class HarnessTreeError extends Error {
+  override readonly name = "HarnessTreeError"
+  readonly issues: readonly string[]
+
+  constructor(message: string, issues: readonly string[]) {
+    super(message)
+    this.issues = issues
+  }
+}
+
+/** Case-fold key used to detect names that collide on APFS/NTFS/ext4-casefold. */
+function foldKey(path: string): string {
+  return path.normalize("NFC").toLowerCase()
+}
+
+function impliedDirectories(path: string): string[] {
+  const segments = path.split("/")
+  const directories: string[] = []
+  for (let index = 1; index < segments.length; index += 1) {
+    directories.push(segments.slice(0, index).join("/"))
+  }
+  return directories
+}
+
+/**
+ * Everything that would make a tree impossible to write, collected in one pass.
+ *
+ * Pure and portable: it never touches a disk, so a tree is rejected before a single byte is written
+ * and the same checks run in CI on a case-insensitive macOS volume or a case-sensitive one.
+ */
+export function materialisabilityIssues(tree: HarnessTree): string[] {
+  const issues: string[] = []
+  const paths = Object.keys(tree).sort()
+  if (paths.length > TREE_LIMITS.maxFiles) {
+    issues.push(`${paths.length} files exceeds the ${TREE_LIMITS.maxFiles}-file limit`)
+  }
+
+  const files = new Set(paths)
+  const directories = new Set<string>()
+  let totalBytes = 0
+  for (const path of paths) {
+    const bytes = Buffer.byteLength(tree[path] ?? "", "utf8")
+    if (bytes > TREE_LIMITS.maxFileBytes) {
+      issues.push(`${path}: ${bytes} bytes exceeds the ${TREE_LIMITS.maxFileBytes}-byte file limit`)
+    }
+    totalBytes += bytes
+    for (const directory of impliedDirectories(path)) {
+      if (files.has(directory)) {
+        issues.push(
+          `${JSON.stringify(directory)}: is a file and also a directory containing ${path}`,
+        )
+      }
+      directories.add(directory)
+    }
+  }
+  if (totalBytes > TREE_LIMITS.maxTotalBytes) {
+    issues.push(`${totalBytes} bytes exceeds the ${TREE_LIMITS.maxTotalBytes}-byte tree limit`)
+  }
+  if (paths.length + directories.size > TREE_LIMITS.maxEntries) {
+    issues.push(
+      `${paths.length + directories.size} entries exceeds the ${TREE_LIMITS.maxEntries}-entry limit`,
+    )
+  }
+
+  // Directories are folded too: `A/x` and `a/y` are different records but one directory on APFS.
+  // Collected into sets first, because one path can legitimately appear as both a file key and an
+  // implied directory, and that self-overlap is reported by the prefix check above, not as a collision.
+  const folded = new Map<string, Set<string>>()
+  for (const entry of [...paths, ...directories]) {
+    const key = foldKey(entry)
+    const group = folded.get(key)
+    if (group === undefined) folded.set(key, new Set([entry]))
+    else group.add(entry)
+  }
+  for (const [key, group] of folded) {
+    if (group.size > 1) {
+      issues.push(
+        `${[...group].sort().join(" and ")} collide on a case-insensitive file system ` +
+          `(both fold to ${JSON.stringify(key)})`,
+      )
+    }
+  }
+  return issues
+}
+
+/** Throw unless the tree can be materialised. Collects every problem, not just the first. */
+export function assertMaterialisableTree(tree: HarnessTree): void {
+  const issues = materialisabilityIssues(tree)
+  if (issues.length > 0) {
+    throw new HarnessTreeError(`tree cannot be materialised:\n  ${issues.join("\n  ")}`, issues)
+  }
 }
 
 export const RUN_MODES = ["parallel", "sequential"] as const

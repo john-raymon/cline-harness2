@@ -142,18 +142,65 @@ next chunk that touches probe records owns the message.
   `.tmp/spike-evidence.json` and assert: the claim ids it needs are present, each is `verified`, and
   `sdkVersion` matches the installed SDK. Anything less turns "unverified" into "assumed".
 
+## Harness path contract (Chunk 3)
+
+`relPathSchema` is the single gate for every key in a `HarnessTree`, and Chunk 3 tightened it because
+that is the first chunk that puts those names on a disk. It now also rejects Windows-illegal
+punctuation (`< > : " | ? *`), superscript reserved device names (`COM¹`, `LPT²`), and any string that
+is not well-formed UTF-16 — a lone surrogate is written as `U+FFFD`, so a path or body containing one
+cannot round-trip and cannot be hashed honestly. `harnessTreeSchema` values use the same well-formed
+check, because the corruption happens to bodies too.
+
+A tree is additionally rejected before any write when it cannot exist in one directory: a key that is
+also a directory prefix of another key (`a` and `a/b`), or two keys that fold together on a
+case-insensitive volume (`SystemPrompt.md`/`systemprompt.md`, and `A/x` with `a/y`). Checks are pure
+and run before the first byte is written, so a bad tree leaves no partial directory.
+
+This is deliberately harness-tree-only. If Chunk 4 needs to reference arbitrary POSIX repo paths —
+where `notes:2024.md` is a perfectly legal filename — it must use its own repo-path schema rather than
+weakening this one. It must also not slurp a repository through `readTree`: `.git` holds binary pack
+files and empty directories, real repos exceed the file cap and carry lockfiles past 1 MiB, so the
+baseline belongs in git plumbing (commit sha, worktree, tracked diff) rather than in a `HarnessTree`.
+
 ## Known debt carried forward
 
-- **`TreePatch` cannot express deletion.** `""` writes an empty file, by design, because upstream
-  deletion happens by removing the file from disk and reading the directory back. If a candidate
-  harness must genuinely remove a file (likely once rich edits land), `treePatchSchema` becomes
-  `z.record(relPathSchema, z.string().nullable())` — a shape change, so it is recorded here rather
-  than discovered mid-chunk.
+- **The tree store assumes it owns the directory.** `materialiseTree` claims a non-existent leaf with
+  an exclusive `mkdir`, and `readTree` refuses a symlinked root, so writer and reader agree on who may
+  be there. Portable Node path checks cannot defeat a *hostile concurrent writer* — `lstat`-then-open
+  is always raceable and `O_NOFOLLOW` covers only the last component on Linux — so that ownership
+  assumption, not the checks, is the real boundary. Real isolation belongs to the sandbox layer.
+- **`TreePatch` deletion is resolved in Chunk 3, and there is deliberately no filesystem deleter.**
+  `treePatchSchema` is `z.record(relPathSchema, z.string().nullable())`: `null` deletes, `""` writes an
+  empty file, an omitted key inherits. Deletion is applied in memory and the result is materialised
+  into a *new* directory, so no API takes an arbitrary path to delete. The only deletion in the store
+  is rollback of a directory its own call created.
+- **Tree-store rollback is verified by injection, not by observation.** The rollback path (fail after
+  `mkdir`, settle every in-flight write, then remove only the directory the call created) is exercised
+  by stubbing `writeFile`/`rm` through the builtin export table (`syncBuiltinESMExports()`): one test
+  asserts a slow sibling write finishes *before* cleanup runs, another asserts a cleanup failure lands
+  on `cleanupError` without replacing the primary cause. A real write can of course still fail (disk
+  full, `EACCES`, I/O error); injection is used because a schema-valid tree cannot be made to fail
+  deterministically on demand.
+- **The visited-entry cap is reachable, via shared deep prefixes.** 1024 files shaped `d{i}/a/b/c/f`
+  imply 4096 distinct directories, so `files + directories` (5120) passes `maxFiles` and trips
+  `maxEntries`. `readdir` still materialises a whole directory before the counter is consulted, so the
+  cap bounds the *tree*, not one directory listing.
+- **Hardlinks are refused.** A file with `nlink > 1` is an alias to bytes that may live outside the
+  workspace (`~/.ssh/id_rsa` hardlinked in reads as a regular file), so `readTree` rejects it. This
+  also rejects legitimate hardlinks inside the tree — an accepted restriction, not an oversight.
+- **Filenames are decoded from raw bytes.** `readdir` with the default encoding replaces invalid bytes
+  with `U+FFFD`, so two different names on disk can collide onto one key *after* validation. Names are
+  read as buffers and decoded with the same strict decoder as file bodies.
+- **Case-fold collision detection is a heuristic.** `toLowerCase()` over NFC catches the collisions
+  APFS/NTFS actually produce, but it under-folds (Greek final sigma, Turkic dotless i). It is a
+  preflight guard, not a proof of portability: a name it misses fails at write time on that volume.
+- **Preflight limits are policy, not measurement.** 1024 files / 1 MiB per file / 8 MiB total / 4096
+  entries were chosen to bound allocation and traversal, not derived from a real harness.
 - **B2's negative result is fixture-scoped.** It shows `pluginPaths` did not load *these* fixtures
   (an uncompiled `.ts` file, and its bare directory); it does not prove path loading can never work
   for a packaged plugin with a `package.json`. Direct `extensions` injection sidesteps the question.
-- **`validate at the schema` is not a merge guarantee.** Zod strips a top-level `__proto__` and
-  rejects `constructor`/`prototype` on parse, but `applyTreePatch` will faithfully spread whatever a
-  caller hands it. Internal callers must pass parsed trees, or the merge itself needs a guard.
+- **`validate at the schema` is not a merge guarantee.** Zod rejects `__proto__`/`constructor`/
+  `prototype` path segments and non-plain objects, but `applyTreePatch` will faithfully apply whatever
+  a caller hands it. Internal callers must pass parsed trees, or the merge itself needs a guard.
 
 

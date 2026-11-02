@@ -2,13 +2,18 @@ import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 
 import {
+  HarnessTreeError,
+  TREE_LIMITS,
   applyTreePatch,
+  assertMaterialisableTree,
   changedPaths,
+  diffTrees,
   expectedExecutions,
   expectedImprovements,
   harnessTreeSchema,
   isUsableLesson,
   lessonSchema,
+  materialisabilityIssues,
   probeFingerprintSchema,
   relPathSchema,
   runConfigSchema,
@@ -52,6 +57,18 @@ describe("relPathSchema", () => {
       "a/prototype",
       "a\0b.md",
       "a\u0007b.md",
+      // Windows-illegal punctuation, reserved superscript devices, and an unpaired surrogate:
+      // all of these pass a naive POSIX check and then fail or silently corrupt on disk.
+      "a?b.md",
+      "a*b.md",
+      "a<b.md",
+      "a>b.md",
+      "a|b.md",
+      'a"b.md',
+      "note:stream",
+      "COM\u00b9.txt",
+      "lpt\u00b3",
+      "a\ud800b.md",
       "x".repeat(241),
     ]
     for (const path of rejected) {
@@ -116,6 +133,105 @@ describe("harness tree and patch contracts", () => {
   it("reports no changes for a patch that restates current content", () => {
     const base = { "systemprompt.md": "same" }
     assert.deepEqual(changedPaths(base, { "systemprompt.md": "same" }), [])
+  })
+
+  it("deletes with null, keeps empty-string as an empty file, and never mutates its inputs", () => {
+    const base = { "keep.md": "a", "drop.md": "b", "blank.md": "c" }
+    const patch = treePatchSchema.parse({ "drop.md": null, "blank.md": "" })
+    const next = applyTreePatch(base, patch)
+
+    assert.equal("drop.md" in next, false, "null must remove the key")
+    assert.equal(next["blank.md"], "", "an empty string is a file with no body, not a deletion")
+    assert.equal(next["keep.md"], "a", "an omitted path inherits")
+    assert.deepEqual(base, { "keep.md": "a", "drop.md": "b", "blank.md": "c" }, "base is untouched")
+    assert.deepEqual(changedPaths(base, patch), ["blank.md", "drop.md"])
+  })
+
+  it("treats deleting an absent path as a no-op, so patches stay idempotent", () => {
+    const base = { "keep.md": "a" }
+    const patch = treePatchSchema.parse({ "never-existed.md": null })
+    assert.deepEqual(applyTreePatch(base, patch), base)
+    assert.deepEqual(changedPaths(base, patch), [], "deleting nothing is not a change")
+  })
+
+  it("diffs two trees over the union of their keys, including removals", () => {
+    const before = { "keep.md": "same", "edit.md": "old", "gone.md": "x" }
+    const after = { "keep.md": "same", "edit.md": "new", "added.md": "y" }
+    assert.deepEqual(diffTrees(before, after), {
+      added: ["added.md"],
+      modified: ["edit.md"],
+      removed: ["gone.md"],
+    })
+    assert.deepEqual(diffTrees(before, before), { added: [], modified: [], removed: [] })
+  })
+
+  it("refuses a file body that is not well-formed UTF-16", () => {
+    assert.equal(harnessTreeSchema.safeParse({ "a.md": "ok" }).success, true)
+    assert.equal(harnessTreeSchema.safeParse({ "a.md": "bad\ud800body" }).success, false)
+    assert.equal(treePatchSchema.safeParse({ "a.md": "bad\ud800body" }).success, false)
+    assert.equal(treePatchSchema.safeParse({ "a.md": null }).success, true)
+  })
+
+  it("rejects trees that one directory cannot hold", () => {
+    const prefix = materialisabilityIssues({ "a": "x", "a/b": "y" })
+    assert.equal(prefix.length, 1)
+    assert.match(prefix[0] ?? "", /"a": is a file and also a directory containing a\/b/)
+
+    const fileCase = materialisabilityIssues({ "SystemPrompt.md": "x", "systemprompt.md": "y" })
+    assert.equal(fileCase.length, 1)
+    assert.match(fileCase[0] ?? "", /collide on a case-insensitive file system/)
+
+    // Different records, one directory on APFS: the directory prefix folds too.
+    const directoryCase = materialisabilityIssues({ "A/x.md": "x", "a/y.md": "y" })
+    assert.equal(directoryCase.length, 1)
+    assert.match(directoryCase[0] ?? "", /A and a collide/)
+
+    assert.deepEqual(materialisabilityIssues({ "ok/x.md": "x", "ok/y.md": "y" }), [])
+  })
+
+  it("enforces the shared tree limits", () => {
+    const tooBig = { "big.md": "x".repeat(TREE_LIMITS.maxFileBytes + 1) }
+    assert.match(materialisabilityIssues(tooBig)[0] ?? "", /byte file limit/)
+
+    const tooMany = Object.fromEntries(
+      Array.from({ length: TREE_LIMITS.maxFiles + 1 }, (_, index) => [`f${index}.md`, ""]),
+    )
+    assert.match(materialisabilityIssues(tooMany)[0] ?? "", /file limit/)
+
+    assert.throws(() => assertMaterialisableTree({ "a": "x", "a/b": "y" }), HarnessTreeError)
+  })
+})
+
+describe("inherited object keys (blocker regression)", () => {
+  // `"toString" in {}` is true through Object.prototype, and `toString` is a legal filename.
+  it("treats a file named toString as a normal key in patches and diffs", () => {
+    const base: Record<string, string> = { "toString": "owned" }
+    assert.deepEqual(changedPaths({}, { "toString": null }), [], "deleting an absent toString is a no-op")
+    assert.deepEqual(changedPaths(base, { "toString": null }), ["toString"])
+    assert.deepEqual(diffTrees({}, { "toString": "x" }), {
+      added: ["toString"],
+      modified: [],
+      removed: [],
+    })
+    assert.deepEqual(diffTrees({ "toString": "x" }, {}), {
+      added: [],
+      modified: [],
+      removed: ["toString"],
+    })
+    assert.deepEqual(applyTreePatch(base, { "toString": null }), {})
+  })
+})
+
+describe("entry cap reachability", () => {
+  // Astra's counter-example: dirs can outnumber files when many paths share deep prefixes, so the
+  // entry cap is reachable even though maxFiles is 1024.
+  it("fires when shared directory prefixes outnumber the file count", () => {
+    const tree = Object.fromEntries(
+      Array.from({ length: TREE_LIMITS.maxFiles }, (_, index) => [`d${index}/a/b/c/f.md`, ""]),
+    )
+    const issues = materialisabilityIssues(tree)
+    assert.equal(issues.length, 1, JSON.stringify(issues))
+    assert.match(issues[0] ?? "", /entries exceeds the 4096-entry limit/)
   })
 })
 
