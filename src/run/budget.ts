@@ -92,12 +92,17 @@ export function remaining(budget: Budget): { executions: number; improvements: n
   }
 }
 
-export const STOP_REASONS = [
-  "executions-exhausted",
-  "improvements-exhausted",
-  "no-improvement",
-  "error",
-] as const
+/**
+ * Why a run ended.
+ *
+ * `improvements-exhausted` is deliberately *not* here. Chunk 19 treated either counter as terminal; the
+ * end-to-end loop showed that is wrong. Improvements are work the run chose to do, not work it owes, and a
+ * run whose improvement budget is spent still has executions to spend — with `4 * k` executions and `3 * k`
+ * improvements, stopping on the improvement counter makes the last execution of every round unreachable. A
+ * spent improvement budget therefore stops *improving* (`mayStartImprovement`), and only the execution
+ * budget ends the run.
+ */
+export const STOP_REASONS = ["executions-exhausted", "no-improvement", "error"] as const
 export type StopReason = (typeof STOP_REASONS)[number]
 
 export type RunStop =
@@ -142,17 +147,6 @@ export function stopDecision(input: StopDecisionInput): RunStop {
       outcome: "completed",
       reason: "executions-exhausted",
       detail: `${executions.used} of ${executions.limit} executions used (k=${input.budget.k})`,
-    }
-  }
-
-  const improvements = mayStartImprovement(input.budget)
-  if (!improvements.ok) {
-    if (input.budget.openImprovements > 0) return { stop: false }
-    return {
-      stop: true,
-      outcome: "completed",
-      reason: "improvements-exhausted",
-      detail: `${improvements.used} of ${improvements.limit} improvements used (k=${input.budget.k})`,
     }
   }
 

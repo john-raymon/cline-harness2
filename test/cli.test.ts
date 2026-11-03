@@ -168,11 +168,13 @@ describe("main", () => {
     assert.match(plan, /api key: {5}unset/)
   })
 
-  it("says it cannot run rather than reporting success", async () => {
+  it("wires the real run by default, and reports its failure as a failure", async () => {
     const { io, err } = recorder()
-    const code = await main(["task"], { env: NO_ENV }, io, CWD)
-    assert.equal(code, EXIT_CODES.usage)
-    assert.match(err.join("\n"), /no run wired/)
+    // No `execute` supplied: the CLI uses `runHarness`. A repo that does not exist fails at capture, which
+    // proves the pipeline is wired (exit 1, not a usage error) without needing a provider.
+    const code = await main(["task"], { env: NO_ENV }, io, "/nonexistent-repo-for-cli-test")
+    assert.equal(code, EXIT_CODES.failed)
+    assert.match(err.join("\n"), /run failed/)
   })
 })
 

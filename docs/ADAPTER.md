@@ -994,3 +994,89 @@ task that is given both ways (`--task x` plus positional words) is refused inste
 flag whose value looks like the next flag (`--repo --dry-run`) reports a missing value rather than taking
 the flag as a path and disabling a mode. A whitespace-only task is refused. A single-dash token is an
 unknown flag rather than a task word — `--` is how you pass a prompt that begins with a dash.
+
+## End to end (Chunk 21)
+
+`src/run/harness.ts` is the loop; `src/cli.ts` wires it as the default executor, so `harness2 "<task>"`
+now runs it. Everything below the loop already existed and was verified on its own — this chunk is the
+wiring, and wiring is where a system starts claiming things no part of it can support.
+
+1. **One capture, then one identity per tree.** `captureBaseline` freezes the workspace; the loop compiles
+   the prompt from that tree and starts the ledger with `run.started`, whose `baselineSha` is the capture's.
+   When an improvement is accepted the baseline is **re-based** (`rebaseBaseline`) rather than re-captured:
+   an improvement changes the harness and nothing else, so exactly one fingerprint field moves (`treeSha`)
+   and `baseSha`, `dependencyLockHash`, `manifestSha` and `ssotRulesHash` carry over. Recomputing from the
+   capture would have to re-derive the association list, and a fresh `[]` there silently claims the repo
+   links to nothing. Without any re-basing, the second execution mounts a tree its baseline never captured
+   and `verifyHarnessBaseline` refuses it — correctly, but only after the improvement was recorded.
+2. **4k executions and 3k improvements are one run, not two counters racing.** The Improver runs after
+   every execution except the last of the round, and is skipped once `mayStartImprovement` refuses. This
+   corrects a Chunk 19 assumption that either counter could end a run: with `4 * k` executions and
+   `3 * k` improvements, ending on the improvement counter makes the last execution of every round
+   unreachable. `improvements-exhausted` is therefore no longer a stop reason — a spent improvement budget
+   stops *improving*, and only the execution budget ends the run. `k=1` is exactly 4 executions.
+3. **The grader is a port, and its default is deliberately weak.** With no task oracle, a turn that
+   produced text and did not error counts as a pass. `deps.grade` replaces it. Inventing a stricter default
+   here would make every improvement look justified by evidence the harness never collected.
+4. **Reflection only on failure.** A passing execution has no lesson to teach, so `reflect` is called with
+   the failed execution's evidence, and a refusal (nothing to reflect on, unparseable reply) is reported and
+   counted as nothing rather than as a lesson. Accepted lessons go into the library and, from the next
+   iteration on, into the prompt through `LongTermMEMORY.md`.
+5. **T4 measures the turn the harness actually left.** `detectContext` runs over the task plus the final
+   text with the compiled system prompt; compaction only happens when the tier says so, and a refusal with
+   a positive residual is recorded as `overflow_recovery` against that execution. The conversation is built
+   from the turn result rather than read from `messagesPath`, which the adapter records as nullable — a run
+   that depended on that file would be measuring whatever the SDK happened to flush.
+6. **Every edge is a port**: capture, the SDK loader, the oracle clients, the clock and the grader. That is
+   what makes `pnpm test` cover the whole loop hermetically, and `scripts/verify-e2e.ts` run the same loop
+   against this repository with only the model edges scripted.
+
+**What is not done, stated plainly.**
+
+- **No live model run happened.** `HARNESS2_LIVE_ORACLE=on pnpm verify:e2e` is the live mode and it needs a
+  solver key; none was present in this environment, so the live half of the gate is **unverified**, not
+  "passing". The scripted mode is a real end-to-end run of the wiring (real capture, real ledger, real tree
+  on disk, 4 executions / 3 improvements / `completed`) but it is not a model result.
+- **`selectCandidate` is not on this loop's path.** A candidate has to be measured under a probe fingerprint
+  that matches the baseline's, and `composeProbeFingerprint` includes `compiledPromptHash` and `treeSha`, so
+  any tree-changing improvement moves its own fingerprint and the matched-contrast gate refuses it. The
+  Selector is for comparing one harness across *instances* of a task; with a single task there is nothing
+  matched to compare. Wiring it in anyway would have produced a stage that always refuses.
+- **No arbitration probe.** `arbitration` is still `off` by default and this loop never calls
+  `arbitrate()`; the dual-oracle path stays available and unused, as Chunk 15 documented.
+- **`k > 1` is not exercised end to end.** The loop takes the budget from `k` and would run `4k`
+  executions, but nothing yet varies the task across rounds, so the recursive half of the method is
+  unverified at this level.
+- **The run directory is not garbage-collected**, and the improved tree is written under `<runDir>/tree`
+  rather than back into the repository: this harness proposes harnesses, it does not rewrite the workspace
+  it captured.
+
+**Final dual-model audit fixes (both advisors, applied before commit).**
+
+1. **The ledger is closed in a `finally`.** A throw from grading, reflection, `materialiseTree` or a caller's
+   progress callback used to leave the file handle and the lock behind. `close()` is idempotent, so the
+   happy path is unchanged.
+2. **T4 runs before `execution.finished`.** `recordOverflowRecovery` appends an attempt against the
+   execution, and replay refuses an attempt whose target is already finished — so closing first made every
+   real overflow unrecoverable and turned the throw into a crashed run.
+3. **`improvement.started` sits outside the `try` that closes it.** If the opening append failed, the catch
+   appended a `finished` event for an operation that never opened, and the ledger's invariant error replaced
+   the real cause.
+4. **A proposal may not add or delete a harness path.** Adding a file changes what the baseline manifest
+   describes (presence, not only content), and re-basing only `treeSha` would then be a false statement
+   about the repo. Such a proposal is rejected and the reason recorded; `LongTermMEMORY.md` is exempt because
+   the loop owns it. Improving *captured* files is what a run can honestly do mid-run.
+5. **A filed lesson feeds the very next execution.** It is applied to the tree (and re-based, recompiled)
+   when it is filed, not only when a later proposal is accepted — otherwise the loop kept measuring a harness
+   that had not learned what it just recorded.
+6. **`improvements` now comes from the ledger**, with `acceptedImprovements` as the adopted subset. The local
+   counter reported 0 improvements while `run.finished` recorded 1 whenever a proposal was rejected.
+7. **Rejections name their cause.** A refused proposal now reports `CODE: reason`; a scripted verification bug
+   (three identical bodies) was invisible until the code was printed, which is the argument for printing it.
+8. **Secrets are redacted at both boundaries.** Evidence bodies and progress lines are scrubbed against the
+   configured keys and the CLI plan is scrubbed against the caller-supplied task/model/endpoint strings — a
+   turn that echoes a credential must not forward it to the Improver or the Reflector.
+
+Two more, found by the same pass without a code change: generated run ids carry a random suffix (a
+millisecond clock can repeat inside one process, and `run.started` refuses a second time), and a
+whitespace-only task is a usage error (`2`), not a failed run (`1`).

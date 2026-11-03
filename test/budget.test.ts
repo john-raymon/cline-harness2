@@ -80,12 +80,17 @@ describe("stopDecision", () => {
     assert.match(at.detail, /4 of 4 executions used/)
   })
 
-  it("stops on improvements, and calls a learned-nothing cycle halted", () => {
-    const exhausted = stopDecision({ budget: budgetOf({ k: 2, executions: 1, improvements: 6 }) })
-    assert.equal(exhausted.stop, true)
-    if (!exhausted.stop) return
-    assert.equal(exhausted.reason, "improvements-exhausted")
+  it("stops improving when the improvement budget is spent, without ending the run", () => {
+    const spent = budgetOf({ k: 2, executions: 1, improvements: 6 })
+    assert.equal(mayStartImprovement(spent).ok, false, "six of six improvements used")
+    assert.equal(
+      stopDecision({ budget: spent }).stop,
+      false,
+      "improvements are work the run chose to do, not work it owes: executions remain, so it continues",
+    )
+  })
 
+  it("calls a learned-nothing cycle halted", () => {
     const barren = stopDecision({
       budget: budgetOf({ k: 1, executions: 1, improvements: 1 }),
       lastImprovementAccepted: false,

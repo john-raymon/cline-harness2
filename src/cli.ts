@@ -1,4 +1,5 @@
 import { ConfigError, loadConfig } from "./config.ts"
+import { redactSecrets, runHarness } from "./run/harness.ts"
 import { helpText, parseArgv } from "./cli/argv.ts"
 import { budgetOf, remaining } from "./run/budget.ts"
 import type { RunConfig } from "./domain/schemas.ts"
@@ -20,6 +21,8 @@ export interface CliRunInput {
   readonly config: RunConfig
   readonly repo: string
   readonly task: string
+  /** Which input supplied the solver key: a flag name, an env name, or `"absent"`. Never the key. */
+  readonly apiKeySource: string
 }
 
 export interface CliRunOutcome {
@@ -28,7 +31,7 @@ export interface CliRunOutcome {
 }
 
 export interface CliDeps {
-  /** The run itself. Absent means this build cannot execute, and says so instead of pretending. */
+  /** The run itself. Defaults to `runHarness`, wired here so `harness2 <task>` actually runs. */
   readonly execute?: (input: CliRunInput) => Promise<CliRunOutcome>
   readonly env?: Readonly<Record<string, string | undefined>>
 }
@@ -62,7 +65,7 @@ export async function main(
     io.err("try: harness2 --help")
     return EXIT_CODES.usage
   }
-  if (parsed.task === undefined && !parsed.dryRun) {
+  if ((parsed.task === undefined || parsed.task.trim().length === 0) && !parsed.dryRun) {
     io.err('harness2: a task is required; pass it as the last argument or with --task "..."')
     io.err("try: harness2 --help")
     return EXIT_CODES.usage
@@ -86,22 +89,39 @@ export async function main(
   for (const warning of loaded.warnings) io.err(`harness2: warning: ${warning}`)
   const config = loaded.config
 
-  if (parsed.dryRun || deps.execute === undefined) {
+  if (parsed.dryRun) {
     printPlan(io, { config, repo: parsed.repo, task: parsed.task }, loaded.sources)
-    if (parsed.dryRun) return EXIT_CODES.ok
-    io.err("harness2: this build has no run wired; use --dry-run to inspect the plan")
-    return EXIT_CODES.usage
+    return EXIT_CODES.ok
   }
 
-  const task = parsed.task ?? ""
+  const execute = deps.execute ?? ((input: CliRunInput) => executeWithRunHarness(input, io))
   try {
-    const result = await deps.execute({ config, repo: parsed.repo, task })
+    const result = await execute({
+      config,
+      repo: parsed.repo,
+      task: parsed.task ?? "",
+      apiKeySource: loaded.apiKeySource,
+    })
     if (result.detail !== undefined) io.out(`${result.outcome}: ${result.detail}`)
     return EXIT_CODES[result.outcome === "completed" ? "ok" : result.outcome === "halted" ? "halted" : "failed"]
   } catch (error) {
     io.err(`harness2: run failed: ${error instanceof Error ? error.message : String(error)}`)
     return EXIT_CODES.failed
   }
+}
+
+/** The real run. Progress goes to stderr so stdout stays the run's result. */
+function executeWithRunHarness(input: CliRunInput, io: CliIo): Promise<CliRunOutcome> {
+  return runHarness({
+    config: input.config,
+    repo: input.repo,
+    task: input.task,
+    apiKeySource: input.apiKeySource,
+    report: (line) => io.err(`harness2: ${line}`),
+  }).then((result) => ({
+    outcome: result.outcome,
+    detail: `${result.detail} (run ${result.runId}, ${result.executions} executions, ${result.improvements} improvements)`,
+  }))
 }
 
 /** Everything the run will use, so `--dry-run` answers "what would happen" without spending anything. */
@@ -111,6 +131,12 @@ function printPlan(
   sources: Readonly<Partial<Record<string, string>>>,
 ): void {
   const { config } = input
+  const secrets = [config.apiKey, config.geminiApiKey, config.astraApiKey].filter(
+    (value): value is string => typeof value === "string" && value.trim().length >= 8,
+  )
+  // The task, the model id and the endpoint are caller-supplied strings: a key echoed into one of them
+  // would otherwise be printed as part of a "harmless" plan.
+  const out = (line: string): void => io.out(redactSecrets(line, secrets))
   const budget = budgetOf({ k: config.k, executions: 0, improvements: 0 })
   const room = remaining(budget)
   const from = (key: string): string => {
@@ -118,14 +144,16 @@ function printPlan(
     return source === undefined ? "" : ` (${source})`
   }
 
-  io.out(`repo:        ${input.repo}`)
-  io.out(`task:        ${input.task ?? "(none — dry run)"}`)
-  io.out(`model:       ${config.modelId}${from("modelId")}`)
-  io.out(`provider:    ${config.providerId}${from("providerId")} at ${config.baseUrl}`)
-  io.out(`budget:      k=${config.k}${from("k")} -> ${room.executions} executions, ${room.improvements} improvements`)
-  io.out(
+  out(`repo:        ${input.repo}`)
+  out(`task:        ${input.task ?? "(none - dry run)"}`)
+  out(`model:       ${config.modelId}${from("modelId")}`)
+  out(`provider:    ${config.providerId}${from("providerId")} at ${config.baseUrl}`)
+  out(
+    `budget:      k=${config.k}${from("k")} -> ${room.executions} executions, ${room.improvements} improvements`,
+  )
+  out(
     `t4:          tail ${config.tailTokens} / target ${config.targetTokens} / b1 ${config.b1Tokens} / b2 ${config.b2Tokens}`,
   )
-  io.out(`arbitration: ${config.arbitration}${from("arbitration")}`)
-  io.out(`api key:     ${config.apiKey === undefined ? "unset" : "set"}`)
+  out(`arbitration: ${config.arbitration}${from("arbitration")}`)
+  out(`api key:     ${config.apiKey === undefined ? "unset" : "set"}`)
 }
