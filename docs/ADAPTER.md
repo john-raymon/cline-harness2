@@ -765,3 +765,51 @@ records a call in the ledger yet: `attempt.recorded` has no oracle-substitution 
 exists. And `usage` is only present when a CLI reports it — `gemini-api --output-format json` does,
 `codex exec -o` does not — so cost accounting must treat a missing figure as unknown, not zero.
 
+
+## Dual-oracle arbitration (Chunk 15)
+
+The second opinion is a separate call, a separate file, and one line in the ledger. Nothing is merged.
+
+1. **`off` makes no second call, and says so.** `arbitrate` still returns the primary answer, because
+   the caller needed one; what it does not do is spend a second call or write a probe record. Its status
+   is `skipped` with the reason, so "we chose not to probe" never reads as "we probed and agreed".
+2. **`probe` asks both, sequentially, and never averages.** The first answer stands as *the* answer. The
+   second is kept beside it. Two answers that mean the same but are worded differently are reported as a
+   disagreement: calling a real difference `agreed` because a model paraphrased is the failure this
+   chunk exists to prevent, and the reverse only costs a human a glance.
+3. **The comparison is exact, on normalised lines.** Line endings, trailing spaces and blank lines at the
+   end are noise; everything else is compared as written. Leading blank lines are deliberately *not*
+   stripped: `divergence` carries the 1-based line number and both lines, and that number has to be the
+   line a reader counts in the verbatim text stored beside it. A trailing-blank shift would have made
+   `line: 1` point at line 3 of the answer.
+4. **A failed second call is `partial`, not `agreed` and not a throw.** The primary answer survives with
+   `TRANSPORT_FAILED` (or whichever code) as the reason: losing a good answer to report a transport
+   error is the worst of both outcomes, and an opinion that never arrived is not agreement.
+5. **The evidence is a content-addressed artifact; the ledger gets the pointer.**
+   `<runDir>/artifacts/arbitration-<sha256>.json` holds both answers, the question, the context digest
+   and the divergence — named after the digest of its own bytes, so writing the same pair twice is
+   idempotent, an operator holding only a ledger line can find the file, and a tampered file is reported
+   as `ARBITRATION_ARTIFACT_CORRUPT` instead of being quoted. `ledger.jsonl` carries `arbitration.recorded`
+   with `{arbitrationId, role, status, artifactSha256, contextSha256, primaryProvider, secondaryProvider}`
+   and no model text at all.
+6. **The artifact is durable before the pointer citing it.** A crash between the two leaves evidence no
+   event mentions — cheap to ignore — rather than an event whose evidence was never written.
+7. **`LEDGER_EVENT_VERSION` stays 1.** The new kind is additive: every existing v1 event still validates,
+   so no fixture or ledger has to be re-read. It is a new *kind* rather than an `attempt.recorded`
+   reason because replay must count nothing for it — `physicalAttempts` is the cost line, and a probe is
+   deliberately outside the `4k`/`3k` budget. Folding it into an attempt would have made every recorded
+   disagreement look like a retry.
+
+**Refusals are typed.** `recordArbitration` refuses a `skipped` outcome (there is no second answer to
+freeze), refuses two answers whose `contextSha256` disagree, and refuses a pair whose roles differ — each
+one is a comparison between two different questions, which is not a finding. The artifact schema refuses a
+body that contradicts its own status (`agreed` with one answer, `disagreed` with no divergence, `partial`
+with a divergence), and replay refuses an event that claims `agreed` while naming no second provider, so a
+hand-edited line cannot say two things at once. `readArbitrationArtifact` validates the digest before using
+it as a filename: it arrives from a ledger line an operator could have edited, and `../../x` is not a name.
+
+**What is not done.** Nothing here decides which answer is *right*: the record says they differ and where,
+and a human or a later chunk owns the judgement. There is no retry and no tie-breaker call, so a
+three-way problem is out of scope. `probe` also costs a second call per question with no rate limiting,
+and the ledger has no way to list the arbitrations a run holds — they are counted nowhere by design, so
+finding them means reading the file.

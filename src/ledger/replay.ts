@@ -117,6 +117,7 @@ export function replayLedger(events: readonly LedgerEvent[]): LedgerCounts {
   /** Ids that already finished, so a second terminal event is reported as a duplicate, not a mystery. */
   const closed = new Set<string>()
   const attemptIds = new Set<string>()
+  const arbitrationIds = new Set<string>()
   const byStage: Record<ImprovementStage, number> = { ...ZERO_BY_STAGE }
 
   for (const [index, event] of events.entries()) {
@@ -218,6 +219,32 @@ export function replayLedger(events: readonly LedgerEvent[]): LedgerCounts {
           )
         }
         physicalAttempts += 1
+        break
+      }
+      case "arbitration.recorded": {
+        if (arbitrationIds.has(event.arbitrationId)) {
+          duplicate(event, index, `arbitration ${event.arbitrationId} is recorded twice`)
+        }
+        arbitrationIds.add(event.arbitrationId)
+        // `partial` and a named second provider are two halves of one fact: a probe cannot both have a
+        // second opinion and be missing one. Checked here so a hand-edited line cannot claim both.
+        if (event.status === "partial" && event.secondaryProvider !== null) {
+          invalid(
+            event,
+            index,
+            `a partial probe has no second answer, so it cannot name ${event.secondaryProvider} as one`,
+          )
+        }
+        if (event.status !== "partial" && event.secondaryProvider === null) {
+          invalid(
+            event,
+            index,
+            `a ${event.status} probe compared two answers, so it must name the second provider`,
+          )
+        }
+        // No counter moves. A probe is deliberately outside the `4k`/`3k` budget and is not physical
+        // work the run had to pay for, so `run.finished` must never include it — a reader that counted
+        // it here would make every recorded disagreement look like a retry.
         break
       }
       case "run.finished": {

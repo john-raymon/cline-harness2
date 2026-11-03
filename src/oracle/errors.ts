@@ -21,6 +21,10 @@ export type OracleErrorCode =
   | "TRANSPORT_TIMEOUT"
   | "REPLY_UNPARSEABLE"
   | "REPLY_EMPTY"
+  | "ARBITRATION_ARTIFACT_INVALID"
+  | "ARBITRATION_ARTIFACT_MISSING"
+  | "ARBITRATION_ARTIFACT_CORRUPT"
+  | "ARBITRATION_REFUSED"
 
 export class OracleError extends Error {
   override readonly name = "OracleError"

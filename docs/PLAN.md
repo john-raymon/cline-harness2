@@ -21,7 +21,7 @@ end of every chunk so scope survives a context reset.
 | 12 | impl ✓ | T4 detector | measure context, apply `tail < target < b1 < b2`, decide stub vs summarise | thresholds trigger at the right counts |
 | 13 | impl ✓ | T4 compaction executor | summarise to target, preserve the verbatim tail, `overflow_recovery` residual logged | target met, tail intact |
 | 14 | impl ✓ | Oracle clients | gemini + astra behind Improver/Composer/Selector/Reflector roles, raw context in every call | one real call per role |
-| 15 | draft | Dual-oracle arbitration | compare oracle outputs, `off` by default, `probe` outside the ledger | disagreement is surfaced, not averaged |
+| 15 | impl ✓ | Dual-oracle arbitration | compare oracle outputs, `off` by default, `probe` outside the ledger | disagreement is surfaced, not averaged |
 | 16 | draft | Improver loop | propose `e_{k+1}` from `e_k` evidence | proposals are patches, not rewrites |
 | 17 | draft | Selector + Reflector | matched-contrast probe (fingerprint must agree), reflections from failures | unequal probes are refused |
 | 18 | draft | Lesson library | capture lessons, dedupe, cap, feed `LongTermMEMORY.md` | a duplicate lesson is not re-added |

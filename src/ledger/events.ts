@@ -79,6 +79,16 @@ export const RUN_OUTCOMES = ["completed", "halted", "failed"] as const
 export const runOutcomeSchema = z.enum(RUN_OUTCOMES)
 export type RunOutcome = z.infer<typeof runOutcomeSchema>
 
+/**
+ * How two oracles answered the same question.
+ *
+ * `partial` exists because a second opinion that never arrived is not agreement: one answer plus one
+ * failure has to be distinguishable from two answers that matched.
+ */
+export const ARBITRATION_STATUSES = ["agreed", "disagreed", "partial"] as const
+export const arbitrationStatusSchema = z.enum(ARBITRATION_STATUSES)
+export type ArbitrationStatus = z.infer<typeof arbitrationStatusSchema>
+
 const envelope = {
   version: z.literal(LEDGER_EVENT_VERSION),
   /** Contiguous from 1. A gap means a line was lost or written elsewhere. */
@@ -146,6 +156,36 @@ const attemptRecordedEventSchema = z.strictObject({
   reason: attemptReasonSchema,
 })
 
+/**
+ * A dual-oracle probe, recorded as a pointer.
+ *
+ * The two replies live in a content-addressed artifact under `<runDir>/artifacts/`; this event carries
+ * only the digest that names it. That keeps `ledger.jsonl` small — every append replays the whole file,
+ * so a ledger that inlined two multi-kilobyte model answers would get slower with every disagreement it
+ * recorded — and it makes the evidence verifiable: the artifact's bytes are re-hashed on read, so a
+ * pointer that no longer matches its file is reported instead of quietly quoted.
+ *
+ * Adding a kind rather than a reason keeps the *shape* honest: an arbitration probe is not a physical
+ * attempt and must not move `physicalAttempts`, which is what `attempt.recorded` would have done.
+ * `LEDGER_EVENT_VERSION` stays 1 because every existing v1 event still validates; only new files can
+ * carry this kind.
+ */
+const arbitrationRecordedEventSchema = z.strictObject({
+  ...envelope,
+  kind: z.literal("arbitration.recorded"),
+  arbitrationId: ledgerIdSchema,
+  /** Which role was asked. Same four names as the improvement stages, so the two cannot diverge. */
+  role: improvementStageSchema,
+  status: arbitrationStatusSchema,
+  /** Digest of the frozen artifact holding both replies. Verified against the file on read. */
+  artifactSha256: sha256HexSchema,
+  /** Digest of the raw context both oracles read, so the pair is attributable to one question. */
+  contextSha256: sha256HexSchema,
+  primaryProvider: z.string().min(1),
+  /** `null` for a `partial` probe: the second oracle never answered, so there is no provider to name. */
+  secondaryProvider: z.string().min(1).nullable(),
+})
+
 const runFinishedEventSchema = z.strictObject({
   ...envelope,
   kind: z.literal("run.finished"),
@@ -166,6 +206,7 @@ export const ledgerEventSchema = z.discriminatedUnion("kind", [
   improvementStartedEventSchema,
   improvementFinishedEventSchema,
   attemptRecordedEventSchema,
+  arbitrationRecordedEventSchema,
   runFinishedEventSchema,
 ])
 
@@ -181,6 +222,7 @@ export type LedgerEventInput =
   | Omit<z.infer<typeof improvementStartedEventSchema>, EnvelopeKey>
   | Omit<z.infer<typeof improvementFinishedEventSchema>, EnvelopeKey>
   | Omit<z.infer<typeof attemptRecordedEventSchema>, EnvelopeKey>
+  | Omit<z.infer<typeof arbitrationRecordedEventSchema>, EnvelopeKey>
   | Omit<z.infer<typeof runFinishedEventSchema>, EnvelopeKey>
 
 export type RunStartedEvent = z.infer<typeof runStartedEventSchema>
