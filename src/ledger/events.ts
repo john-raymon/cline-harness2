@@ -58,7 +58,20 @@ export type ImprovementOutcome = z.infer<typeof improvementOutcomeSchema>
  * attempt would be a retry of something. Attempts are the physical cost — tokens spent, provider
  * calls made — and they never move the logical `4k`/`3k` counters.
  */
-export const ATTEMPT_REASONS = ["initial", "retry", "schema-repair", "oracle-substitution"] as const
+export const ATTEMPT_REASONS = [
+  "initial",
+  "retry",
+  "schema-repair",
+  "oracle-substitution",
+  /**
+   * An overflow that T4 could not fully recover, recorded against the execution it happened in.
+   *
+   * Folding this into the reason enum rather than adding an event kind keeps `LEDGER_EVENT_VERSION` at 1: the
+   * residual is a physical attempt like any other, and a new kind would have forced every v1 fixture and
+   * every existing ledger to be re-read for a line that says "still over target by N".
+   */
+  "overflow-recovery",
+] as const
 export const attemptReasonSchema = z.enum(ATTEMPT_REASONS)
 export type AttemptReason = z.infer<typeof attemptReasonSchema>
 

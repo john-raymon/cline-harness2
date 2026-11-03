@@ -19,7 +19,7 @@ end of every chunk so scope survives a context reset.
 | 10 | impl ✓ | Plugin + hooks (c8) | guard plugin via `extensions: [obj]`, hooks that record evidence | hook fires and effect is observable |
 | 11 | impl ✓ | Subagent orchestration | child `ClineCore` on the same cwd, excluded from the 4k/3k ledger, contract hooks installed | child budget never counted |
 | 12 | impl ✓ | T4 detector | measure context, apply `tail < target < b1 < b2`, decide stub vs summarise | thresholds trigger at the right counts |
-| 13 | draft | T4 compaction executor | summarise to target, preserve the verbatim tail, `overflow_recovery` residual logged | target met, tail intact |
+| 13 | impl ✓ | T4 compaction executor | summarise to target, preserve the verbatim tail, `overflow_recovery` residual logged | target met, tail intact |
 | 14 | draft | Oracle clients | gemini + astra behind Improver/Composer/Selector/Reflector roles, raw context in every call | one real call per role |
 | 15 | draft | Dual-oracle arbitration | compare oracle outputs, `off` by default, `probe` outside the ledger | disagreement is surfaced, not averaged |
 | 16 | draft | Improver loop | propose `e_{k+1}` from `e_k` evidence | proposals are patches, not rewrites |

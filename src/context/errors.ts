@@ -10,6 +10,7 @@ export type ContextErrorCode =
   | "CONTEXT_THRESHOLDS_INVALID"
   | "CONTEXT_ESTIMATOR_INVALID"
   | "CONTEXT_MEASURE_INVALID"
+  | "CONTEXT_RESIDUAL_INVALID"
 
 export class ContextError extends Error {
   override readonly name = "ContextError"

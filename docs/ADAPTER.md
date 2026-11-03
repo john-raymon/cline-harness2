@@ -670,3 +670,43 @@ holding a Zod schema would serialize the schema's internals and inflate `fixed`.
 the system prompt and tool list on every call, which is twice per turn once the executor exists; a cache keyed
 by object identity belongs there, not here. And the ledger still has no compaction event kind, so
 `overflow_recovery` residuals have nowhere to go until Chunk 13 decides whether to add one.
+
+### 13. T4 compaction executor
+
+`compactContext` rewrites the eligible prefix through an injectable `Summariser` and returns the messages
+only when a re-measure of the assembled result is at or below `targetTokens`. That re-measure is the whole
+contract: a summariser that returns prose longer than what it replaced would otherwise be reported as a
+success because it was called.
+
+**The summariser is a seam, not an implementation.** `Summariser` is `{ id, summarise({messages, budgetTokens,
+estimator}) }`, and the shipped `extractiveSummariser` is deterministic — no model, no clock, no randomness,
+so the same conversation always compacts to the same bytes and a run can be replayed without a second
+provider call. It keeps whole lines until the budget is spent and truncates the line that crosses it, walking
+code points so a multi-byte character is never split. It is a floor rather than a summary in the useful
+sense: Chunk 14's oracle client implements the same interface, and the compactor does not know which one it
+got.
+
+**The rewrite preserves history and order.** Candidates are collapsed one contiguous run at a time, each
+summary placed where its run was. A single summary hoisted to the first candidate slot would move the account
+of late turns in front of turns that were never rewritten — the history it is meant to compress, inverted. A
+run whose summary comes back empty keeps its messages: deleting them is the one outcome worse than staying
+over budget. A turn carrying both prose and tool calls contributes both to the summariser, because dropping
+the call would drop the part that says what the run actually did.
+
+**Refusals are typed and carry a residual.** `NOTHING_ELIGIBLE`, `TARGET_UNREACHABLE`, `SUMMARY_EMPTY` and
+`TARGET_NOT_MET` all leave the caller's array untouched, and every refusal that happens while over target
+reports `residual > 0` — the estimated amount the run stays over by. Reporting zero because "we could not
+try" would be indistinguishable from a run that met its target, and there would be nothing to record.
+
+**The residual goes into the ledger as an attempt, not a new event kind.** `recordOverflowRecovery` appends
+`attempt.recorded` with `reason: "overflow-recovery"` against an open execution. Replay already counts that
+as a physical attempt, which is what a residual is — work that happened and could not be reclaimed — and it
+keeps `LEDGER_EVENT_VERSION` at 1, so no existing fixture or ledger has to be re-read for it. The caller
+supplies `attemptId` and `executionId`: the id has to be derived per overflow event, because a fresh id per
+call would let the same residual be charged twice while a reused id is rejected as a duplicate.
+
+**What is not done.** Nothing here registers a message builder. `B3.messageBuilder` was verified as a hook,
+not as an async-capable one, and this compactor is `async` because a summariser may be; wiring it in is a
+separate decision that needs its own evidence. `B4.compaction` remains unverified, so this module never calls
+the SDK's `compact` and claims no ownership of overflow recovery — the residual record says the run was over
+budget, not that the overflow path was exercised.
