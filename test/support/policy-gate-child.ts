@@ -53,8 +53,8 @@ function installedSdkVersion(): string {
 const { bootstrapSession, sessionBootstrapRecordSchema } = await import(
   "../../src/adapter/session.ts"
 )
-const { buildBootstrapPrompt } = await import("../../src/adapter/prompt.ts")
 const { runConfigSchema } = await import("../../src/domain/schemas.ts")
+const { harnessBaseline } = await import("./baseline-fixture.ts")
 const { readTree } = await import("../../src/harness/tree-store.ts")
 const { SPIKE_MODEL_ID, startFakeProvider } = await import("./fake-provider.ts")
 
@@ -91,10 +91,8 @@ try {
       apiKey: "live-test-key",
       root: join(home, "runs"),
     }),
-    baseline: { tree: TREE, baselineSha: "b".repeat(64) },
-    prompt: buildBootstrapPrompt("Create the marker file with run_commands, then answer done.", {
-      allowedTools: mode === "allow" ? ["run_commands"] : [],
-    }),
+    baseline: harnessBaseline(TREE),
+    task: "Create the marker file with run_commands, then answer done.",
     apiKeySource: "SOLVER_API_KEY",
     evidencePath,
     installedSdkVersion: sdkVersion,

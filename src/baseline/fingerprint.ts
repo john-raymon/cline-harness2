@@ -1,7 +1,7 @@
 import { z } from "zod"
 
 import { canonicalSha256 } from "../domain/canonical.ts"
-import { sha256HexSchema, type HarnessTree } from "../domain/schemas.ts"
+import { gitObjectIdSchema, sha256HexSchema, type HarnessTree } from "../domain/schemas.ts"
 import { COMPONENT_VERSION } from "./components.ts"
 
 /**
@@ -15,15 +15,10 @@ import { COMPONENT_VERSION } from "./components.ts"
 
 export const BASELINE_FINGERPRINT_VERSION = 1
 
-/** Git object ids are SHA-1 today and SHA-256 in a repository created with `--object-format`. */
-const gitShaSchema = z
-  .string()
-  .regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/, "expected a lowercase hex git object id")
-
 export const baselineFingerprintSchema = z.strictObject({
   version: z.literal(BASELINE_FINGERPRINT_VERSION),
   manifestSha: sha256HexSchema,
-  baseSha: gitShaSchema,
+  baseSha: gitObjectIdSchema,
   isDirty: z.boolean(),
   /**
    * `null` means "there is no lockfile", which is a different state from an empty one. Composition

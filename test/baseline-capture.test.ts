@@ -109,7 +109,7 @@ describe("component manifest (pre-flight)", () => {
     const validated = validateComponents(DEFAULT_COMPONENTS)
     assert.deepEqual(
       validated.map((component) => component.id),
-      ["clinerules", "experience", "skills"],
+      ["clinerules", "experience", "skills", "instructions", "tools"],
     )
     assert.ok(validated.every((component) => component.required === false))
   })

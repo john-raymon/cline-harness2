@@ -38,7 +38,7 @@ afterEach(async () => {
 
 function sampleRecord(overrides: Partial<SessionBootstrapRecord> = {}): SessionBootstrapRecord {
   return sessionBootstrapRecordSchema.parse({
-    version: 2,
+    version: 3,
     runId: "run-1",
     runDir: "/tmp/run-1",
     harnessDir: "/tmp/run-1/harness",
@@ -48,8 +48,11 @@ function sampleRecord(overrides: Partial<SessionBootstrapRecord> = {}): SessionB
     modelId: "hf:test/model",
     baseUrl: "http://127.0.0.1:1/v1",
     apiKeySource: "SOLVER_API_KEY",
-    promptSource: "bootstrap-constant",
+    promptSource: "compiled",
     promptSha256: SHA_A,
+    compiledPromptHash: SHA_A,
+    probeFingerprintSha256: SHA_A,
+    declaredToolEntries: 0,
     toolPolicySet: ["default:deny"],
     toolInventoryHash: SHA_A,
     toolDecisions: [],

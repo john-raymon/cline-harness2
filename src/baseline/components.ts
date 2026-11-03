@@ -36,10 +36,19 @@ export interface ComponentSpec {
   readonly canonicalSources?: readonly CanonicalSource[]
 }
 
+/**
+ * The default harness: everything the prompt compiler and the tool inventory read.
+ *
+ * `systemprompt.md` and `tools/` are here because Chunks 7–8 gave them a consumer. A component that
+ * capture never visits is a file the compiled prompt cannot see, so leaving them out would make the
+ * tree and the prompt disagree about what the harness is.
+ */
 export const DEFAULT_COMPONENTS: readonly ComponentSpec[] = [
   { id: "clinerules", path: ".clinerules", kind: "directory" },
   { id: "experience", path: "EXPERIENCE.md", kind: "file" },
   { id: "skills", path: ".cline/skills", kind: "directory" },
+  { id: "instructions", path: "systemprompt.md", kind: "file" },
+  { id: "tools", path: "tools", kind: "directory" },
 ]
 
 /** Directories that must never appear anywhere in a component path, at any depth. */

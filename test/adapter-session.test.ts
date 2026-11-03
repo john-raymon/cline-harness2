@@ -6,7 +6,7 @@ import path from "node:path"
 
 import { runConfigSchema, type HarnessTree, type RunConfig } from "../src/domain/schemas.ts"
 import { AdapterError } from "../src/adapter/errors.ts"
-import { buildBootstrapPrompt } from "../src/adapter/prompt.ts"
+import { harnessBaseline } from "./support/baseline-fixture.ts"
 import {
   API_KEY_SOURCES,
   DEFAULT_MAX_ITERATIONS,
@@ -18,6 +18,15 @@ import {
 } from "../src/adapter/session.ts"
 import { readTree } from "../src/harness/tree-store.ts"
 import { PolicyError } from "../src/policy/errors.ts"
+import { buildToolInventory } from "../src/policy/inventory.ts"
+import { FingerprintError } from "../src/fingerprint/errors.ts"
+import {
+  composeProbeFingerprint,
+  DEFAULT_REASONING_EFFORT,
+  DEFAULT_THINKING,
+  probeFingerprintSha256,
+} from "../src/fingerprint/probe.ts"
+import { compilePrompt } from "../src/prompt/compile.ts"
 import { writeEvidence } from "./support/evidence-fixture.ts"
 
 const scratchRoots: string[] = []
@@ -32,8 +41,13 @@ afterEach(async () => {
   for (const root of scratchRoots.splice(0)) await rm(root, { recursive: true, force: true })
 })
 
-const TREE: HarnessTree = { "EXPERIENCE.md": "# lessons\n", ".clinerules/rules.md": "rules\n" }
-const BASELINE_SHA = "a".repeat(64)
+const TREE: HarnessTree = {
+  "EXPERIENCE.md": "# lessons\n",
+  ".clinerules/rules.md": "rules\n",
+  "systemprompt.md": "Be brief.\n",
+}
+const BASELINE = harnessBaseline(TREE)
+const BASELINE_SHA = BASELINE.baselineSha
 const RUN_ID = "20261102T080000Z-abcdef"
 
 interface FakeScript {
@@ -177,8 +191,8 @@ async function inputWith(
   const evidencePath = await writeEvidence(path.join(overrides.rootDir, "spike-evidence.json"))
   return {
     config: configWith(),
-    baseline: { tree: TREE, baselineSha: BASELINE_SHA },
-    prompt: buildBootstrapPrompt("Say ok"),
+    baseline: BASELINE,
+    task: "Say ok",
     apiKeySource: "SOLVER_API_KEY",
     evidencePath,
     installedSdkVersion: "0.2.0",
@@ -241,7 +255,7 @@ describe("pre-flight", () => {
       await codeOf(
         bootstrapSession({
           ...(await inputWith({ rootDir: root })),
-          baseline: { tree, baselineSha: BASELINE_SHA },
+          baseline: harnessBaseline(tree),
           // A session with a hook gate and a skill has two claims to check, and no report to check them
           // against: that is a reason not to start at all.
           evidencePath: path.join(root, "absent-evidence.json"),
@@ -274,7 +288,7 @@ describe("pre-flight", () => {
 
     const record = await bootstrapSession({
       ...(await inputWith({ rootDir: path.join(root, "runs") })),
-      baseline: { tree, baselineSha: BASELINE_SHA },
+      baseline: harnessBaseline(tree),
       evidencePath,
       deps: { loadSdk: fake.loadSdk },
     })
@@ -427,7 +441,7 @@ describe("the record", () => {
     assert.equal(record.runId, RUN_ID)
     assert.equal(record.sessionId, RUN_ID)
     assert.equal(record.baselineSha, BASELINE_SHA)
-    assert.equal(record.promptSource, "bootstrap-constant")
+    assert.equal(record.promptSource, "compiled")
     assert.equal(record.apiKeySource, "SOLVER_API_KEY")
     assert.equal(record.text, "ok")
     assert.equal(record.turns, 2)
@@ -499,7 +513,7 @@ describe("the start payload", () => {
     const tree: HarnessTree = { ...TREE, "tools/run_commands.md": "Run shell commands.\n" }
     const record = await bootstrapSession({
       ...(await inputWith({ rootDir: root })),
-      baseline: { tree, baselineSha: BASELINE_SHA },
+      baseline: harnessBaseline(tree),
       toolPolicy: { allow: ["run_commands"], deny: [] },
       maxIterations: 4,
       deps: { loadSdk: fake.loadSdk },
@@ -545,7 +559,7 @@ describe("the start payload", () => {
     await assert.rejects(
       bootstrapSession({
         ...(await inputWith({ rootDir: root })),
-        baseline: { tree, baselineSha: BASELINE_SHA },
+        baseline: harnessBaseline(tree),
         deps: { loadSdk: fakeSdk().loadSdk },
       }),
       (error: unknown) => error instanceof PolicyError && error.code === "TOOL_INVENTORY_INVALID",
@@ -712,5 +726,112 @@ describe("timeouts and teardown bounds", () => {
     )
     assert.equal(error.code, "SESSION_DISPOSE_FAILED")
     assert.match(error.message, /dispose threw synchronously/)
+  })
+})
+
+describe("the probe fingerprint", () => {
+  it("compiles the prompt from the tree it mounts and records its identity", async () => {
+    const root = await scratch()
+    const record = await bootstrapSession({
+      ...(await inputWith({ rootDir: root })),
+      deps: { loadSdk: fakeSdk().loadSdk },
+    })
+
+    const compiled = compilePrompt({ tree: TREE, task: "Say ok", allowedTools: [] })
+    assert.equal(record.promptSource, "compiled")
+    assert.equal(record.promptSha256, compiled.sha256)
+    assert.equal(record.compiledPromptHash, compiled.compiledPromptHash)
+    assert.deepEqual(
+      compiled.slices.map((slice) => slice.id),
+      ["core", "rules", "memory", "instructions"],
+    )
+    assert.equal(record.declaredToolEntries, 0)
+  })
+
+  it("records the digest of the fingerprint it composed", async () => {
+    const root = await scratch()
+    const record = await bootstrapSession({
+      ...(await inputWith({ rootDir: root })),
+      deps: { loadSdk: fakeSdk().loadSdk },
+    })
+
+    const expected = probeFingerprintSha256(
+      composeProbeFingerprint({
+        baseline: BASELINE.fingerprint,
+        prompt: compilePrompt({ tree: TREE, task: "Say ok", allowedTools: [] }),
+        toolPolicySet: ["default:deny"],
+        toolInventoryHash: buildToolInventory(TREE).hash,
+        config: configWith(),
+      }),
+    )
+    assert.equal(record.probeFingerprintSha256, expected)
+  })
+
+  it("counts the tool entries the tree declares", async () => {
+    const root = await scratch()
+    const tree: HarnessTree = { ...TREE, "tools/run_commands.md": "Run shell commands.\n" }
+    const record = await bootstrapSession({
+      ...(await inputWith({ rootDir: root })),
+      baseline: harnessBaseline(tree),
+      deps: { loadSdk: fakeSdk().loadSdk },
+    })
+    assert.equal(record.declaredToolEntries, 1)
+  })
+
+  it("refuses a tree the baseline fingerprint does not pin, before creating a run directory", async () => {
+    const root = await scratch()
+    // Same fingerprint, one extra rule: the session would run a harness capture never saw.
+    const smuggled: HarnessTree = { ...TREE, ".clinerules/smuggled.md": "extra\n" }
+    await assert.rejects(
+      bootstrapSession({
+        ...(await inputWith({ rootDir: root })),
+        baseline: { ...BASELINE, tree: smuggled },
+        deps: { loadSdk: fakeSdk().loadSdk },
+      }),
+      (error: unknown) => error instanceof FingerprintError && error.code === "FINGERPRINT_MISMATCH",
+    )
+    assert.deepEqual(await runEntries(root), [])
+  })
+
+  it("refuses an unpinned baseline instead of fingerprinting a guess", async () => {
+    const root = await scratch()
+    await assert.rejects(
+      bootstrapSession({
+        ...(await inputWith({ rootDir: root })),
+        baseline: harnessBaseline(TREE, { dependencyLockHash: null }),
+        deps: { loadSdk: fakeSdk().loadSdk },
+      }),
+      (error: unknown) => error instanceof FingerprintError && error.code === "FINGERPRINT_INCOMPLETE",
+    )
+    assert.deepEqual(await runEntries(root), [])
+  })
+
+  it("writes the tree it verified, even if the caller mutates it while the session starts", async () => {
+    const root = await scratch()
+    const tree: HarnessTree = { ...TREE }
+    const baseline = harnessBaseline(tree)
+
+    const pending = bootstrapSession({
+      ...(await inputWith({ rootDir: root })),
+      baseline: { ...baseline, tree },
+      deps: { loadSdk: fakeSdk().loadSdk },
+    })
+    // The session has already verified and compiled this tree, but has not written it yet.
+    tree[".clinerules/smuggled.md"] = "smuggled after verification\n"
+
+    const record = await pending
+    assert.deepEqual(await readTree({ dir: record.harnessDir }), TREE)
+  })
+
+  it("sends the reasoning settings it records", async () => {
+    const root = await scratch()
+    const fake = fakeSdk()
+    await bootstrapSession({
+      ...(await inputWith({ rootDir: root })),
+      deps: { loadSdk: fake.loadSdk },
+    })
+    const config = fake.state.startInput?.["config"] as Record<string, unknown>
+    assert.equal(config["reasoningEffort"], DEFAULT_REASONING_EFFORT)
+    assert.equal(config["thinking"], DEFAULT_THINKING)
   })
 })

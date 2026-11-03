@@ -112,7 +112,7 @@ describe("live session bootstrap", () => {
       assert.ok(record.eventCount > 0, "the session emitted no events")
       assert.ok(record.turns >= 1, `expected at least one iteration, got ${record.turns}`)
       assert.equal(record.apiKeySource, "SOLVER_API_KEY")
-      assert.equal(record.promptSource, "bootstrap-constant")
+      assert.equal(record.promptSource, "compiled")
       assert.ok(payload.providerRequests > 0, "the provider was never called")
 
       // The run directory lives inside the temporary home, so nothing this test did can escape it.

@@ -5,6 +5,7 @@ import { sha256HexSchema, type HarnessTree, type RunConfig } from "../domain/sch
 import { policyHooks } from "../policy/hooks.ts"
 import { buildToolInventory } from "../policy/inventory.ts"
 import {
+  allowedToolNames,
   parseToolPolicy,
   toolDecisionSchema,
   toolPolicySetOf,
@@ -13,7 +14,15 @@ import {
 } from "../policy/policy.ts"
 import { assertClaimsSatisfied, requiredClaimsFor } from "./claim-gate.ts"
 import { AdapterError } from "./errors.ts"
-import { PROMPT_SOURCES, type CompiledPrompt } from "./prompt.ts"
+import { compilePrompt, PROMPT_SOURCES, type CompiledPrompt } from "../prompt/compile.ts"
+import {
+  composeProbeFingerprint,
+  DEFAULT_REASONING_EFFORT,
+  DEFAULT_THINKING,
+  probeFingerprintSha256,
+  verifyHarnessBaseline,
+} from "../fingerprint/probe.ts"
+import type { BaselineFingerprint } from "../baseline/fingerprint.ts"
 import { newRunId, prepareRunDir } from "./run-dir.ts"
 
 /**
@@ -60,6 +69,13 @@ interface CoreHandle {
 export interface HarnessBaseline {
   readonly tree: HarnessTree
   readonly baselineSha: string
+  /**
+   * What capture froze for this harness.
+   *
+   * Required rather than optional: a session that cannot compose a probe fingerprint produced a result
+   * that cannot be compared with anything, and an optional field would let that happen silently.
+   */
+  readonly fingerprint: BaselineFingerprint
 }
 
 export interface SessionDeps {
@@ -73,7 +89,14 @@ export interface SessionDeps {
 export interface SessionBootstrapInput {
   readonly config: RunConfig
   readonly baseline: HarnessBaseline
-  readonly prompt: CompiledPrompt
+  /**
+   * The task to run. The prompt is compiled here, from `baseline.tree`.
+   *
+   * Accepting a pre-built prompt would let a caller hand in text compiled from tree A while the session
+   * mounts tree B, and every hash in the record would then describe the wrong harness while parsing
+   * cleanly.
+   */
+  readonly task: string
   readonly apiKeySource: ApiKeySource
   /** Where the spike evidence lives; the gate is the only reader. */
   readonly evidencePath: string
@@ -102,7 +125,7 @@ export interface SessionBootstrapInput {
  * hashes means a record cannot be hand-written into looking valid.
  */
 export const sessionBootstrapRecordSchema = z.strictObject({
-  version: z.literal(2),
+  version: z.literal(3),
   runId: z.string().min(1),
   runDir: z.string().min(1),
   harnessDir: z.string().min(1),
@@ -114,6 +137,18 @@ export const sessionBootstrapRecordSchema = z.strictObject({
   apiKeySource: z.enum(API_KEY_SOURCES),
   promptSource: z.enum(PROMPT_SOURCES),
   promptSha256: sha256HexSchema,
+  /**
+   * Version 3 exists for these three fields.
+   *
+   * `promptSha256` covers the literal text and therefore includes the task; `compiledPromptHash` covers
+   * only what the harness contributed, so two runs of the same harness on different tasks still compare
+   * as one harness. `probeFingerprintSha256` says which `ProbeFingerprint` the run belonged to, and
+   * `declaredToolEntries` is the size of the tool surface the tree declares — the number the tool-entry
+   * budget is enforced against.
+   */
+  compiledPromptHash: sha256HexSchema,
+  probeFingerprintSha256: sha256HexSchema,
+  declaredToolEntries: z.int().nonnegative(),
   /**
    * The policy the session actually ran under, and the inventory it was checked against.
    *
@@ -174,9 +209,42 @@ export async function bootstrapSession(
 
   // The inventory is derived from the tree this session will mount, and validated before anything is
   // created: a malformed `tools/` directory is a reason not to make a run directory at all.
-  const inventory = buildToolInventory(input.baseline.tree)
+  // Snapshot the tree before anything else. `HarnessTree` is a plain object owned by the caller, and
+  // every check below is separated from the write that follows by at least one await; reading the
+  // caller's object again after verifying it would let a mutation in that window run a harness the
+  // fingerprint does not describe. Values are strings, so a shallow copy is a complete snapshot.
+  const tree: HarnessTree = { ...input.baseline.tree }
+  const baseline = { ...input.baseline, tree }
+
+  const inventory = buildToolInventory(tree)
   const policy = input.toolPolicy === undefined ? undefined : parseToolPolicy(input.toolPolicy, inventory)
   const toolPolicySet = toolPolicySetOf(policy)
+
+  // The tree about to be mounted must be the one the baseline describes. Both values are caller
+  // supplied and both parse, so without this check a session can run harness A and record harness B.
+  verifyHarnessBaseline({
+    tree,
+    baselineSha: baseline.baselineSha,
+    fingerprint: baseline.fingerprint,
+  })
+
+  // Compiled from the mounted tree, never accepted from the caller, so the prompt, the inventory, the
+  // policy and the fingerprint all describe the same harness by construction.
+  const prompt = compilePrompt({
+    tree,
+    task: input.task,
+    allowedTools: allowedToolNames(policy),
+  })
+
+  // Composition happens here, before any directory exists: a fingerprint with a hole in it is a reason
+  // not to start a session, not a footnote on a run that already happened.
+  const fingerprint = composeProbeFingerprint({
+    baseline: baseline.fingerprint,
+    prompt,
+    toolPolicySet,
+    toolInventoryHash: inventory.hash,
+    config: input.config,
+  })
   const toolDecisions: ToolDecision[] = []
   const hooks = policyHooks({
     policy,
@@ -199,14 +267,14 @@ export async function bootstrapSession(
   await assertClaimsSatisfied({
     evidencePath: input.evidencePath,
     installedSdkVersion: input.installedSdkVersion,
-    requiredClaims: requiredClaimsFor(input.baseline.tree),
+    requiredClaims: requiredClaimsFor(tree),
   })
 
   const runId = input.runId ?? newRunId(startedAt, deps.random)
   const prepared = await prepareRunDir({
     rootDir: input.rootDir ?? input.config.root,
     runId,
-    tree: input.baseline.tree,
+    tree,
   })
 
   const sdk = await (deps.loadSdk ?? defaultSdkLoader)().catch((error: unknown) => {
@@ -243,12 +311,12 @@ export async function bootstrapSession(
       core,
       sessionId: runId,
       payload: {
-        prompt: input.prompt.taskPrompt,
+        prompt: prompt.taskPrompt,
         config: sessionConfig({
           runId,
           harnessDir: prepared.harnessDir,
           apiKey,
-          prompt: input.prompt,
+          prompt,
           config: input.config,
           maxIterations: input.maxIterations ?? DEFAULT_MAX_ITERATIONS,
           hooks,
@@ -263,7 +331,7 @@ export async function bootstrapSession(
     const durationMs = Math.max(0, Math.round(now().getTime() - startedAt.getTime()))
 
     const record = {
-      version: 2,
+      version: 3,
       runId,
       runDir: prepared.runDir,
       harnessDir: prepared.harnessDir,
@@ -273,8 +341,11 @@ export async function bootstrapSession(
       modelId: input.config.modelId,
       baseUrl: input.config.baseUrl,
       apiKeySource: input.apiKeySource,
-      promptSource: input.prompt.source,
-      promptSha256: input.prompt.sha256,
+      promptSource: prompt.source,
+      promptSha256: prompt.sha256,
+      compiledPromptHash: prompt.compiledPromptHash,
+      probeFingerprintSha256: probeFingerprintSha256(fingerprint),
+      declaredToolEntries: inventory.tools.length,
       toolPolicySet,
       toolInventoryHash: inventory.hash,
       toolDecisions,
@@ -429,6 +500,10 @@ function sessionConfig(input: {
     baseUrl: input.config.baseUrl,
     apiKey: input.apiKey,
     systemPrompt: input.prompt.systemPrompt,
+    // Sent rather than assumed: the fingerprint records these values, so a value the provider default
+    // silently overrode would make the record claim a setting the run never used.
+    reasoningEffort: DEFAULT_REASONING_EFFORT,
+    thinking: DEFAULT_THINKING,
     enableTools: true,
     enableSpawnAgent: false,
     enableAgentTeams: false,

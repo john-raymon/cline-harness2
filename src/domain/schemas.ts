@@ -317,6 +317,17 @@ export const REASONING_EFFORTS = [
 export const reasoningEffortSchema = z.enum(REASONING_EFFORTS)
 export type ReasoningEffort = z.infer<typeof reasoningEffortSchema>
 
+/**
+ * A git object id: SHA-1 today, SHA-256 in a repository created with `--object-format`.
+ *
+ * Baseline capture and the probe fingerprint must accept the same set, or a baseline that was
+ * captured honestly fails to compose into a fingerprint — a 64-character fixture is not a typo, it is
+ * a different repository format.
+ */
+export const gitObjectIdSchema = z
+  .string()
+  .regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/, "expected a lowercase hex git object id")
+
 export const sha256HexSchema = z
   .string()
   .regex(/^[0-9a-f]{64}$/, "expected a lowercase hex sha256 digest")
@@ -455,7 +466,7 @@ export const runConfigSchema = z
 
 export type RunConfig = z.infer<typeof runConfigSchema>
 
-export const PROBE_FINGERPRINT_VERSION = 2
+export const PROBE_FINGERPRINT_VERSION = 3
 
 /**
  * Everything that must be identical for a probe to count as a matched contrast against `e_0`.
@@ -465,7 +476,7 @@ export const PROBE_FINGERPRINT_VERSION = 2
  */
 export const probeFingerprintSchema = z.strictObject({
   version: z.literal(PROBE_FINGERPRINT_VERSION),
-  baseSha: z.string().regex(/^[0-9a-f]{40}$/, "expected a 40-character git commit sha"),
+  baseSha: gitObjectIdSchema,
   dependencyLockHash: sha256HexSchema,
   providerId: z.string().min(1),
   modelId: modelIdSchema,
@@ -477,6 +488,15 @@ export const probeFingerprintSchema = z.strictObject({
   compiledPromptHash: sha256HexSchema,
   t4Policy: z.string().min(1),
   ssotRulesHash: sha256HexSchema,
+  /**
+   * Version 3 exists for this field.
+   *
+   * The other fields cover what the session *reads* — prompt, inventory, policy. This one covers
+   * everything capture froze, which is the only way a change nobody has a slice or an inventory for yet
+   * (`.cline/skills/**` today) still moves the fingerprint. Losing a comparison is cheaper than
+   * recording two different harnesses as one.
+   */
+  treeSha: sha256HexSchema,
   librarySnapshotHash: sha256HexSchema,
   slices: z.array(z.string().min(1)),
 })

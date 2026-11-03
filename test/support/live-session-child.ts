@@ -63,8 +63,8 @@ function installedSdkVersion(): string {
 const { bootstrapSession, sessionBootstrapRecordSchema } = await import(
   "../../src/adapter/session.ts"
 )
-const { buildBootstrapPrompt } = await import("../../src/adapter/prompt.ts")
 const { runConfigSchema } = await import("../../src/domain/schemas.ts")
+const { harnessBaseline } = await import("./baseline-fixture.ts")
 const { readTree } = await import("../../src/harness/tree-store.ts")
 const { SPIKE_MODEL_ID, startFakeProvider } = await import("./fake-provider.ts")
 
@@ -98,8 +98,8 @@ try {
       apiKey: "live-test-key",
       root: join(home, "runs"),
     }),
-    baseline: { tree: TREE, baselineSha: "b".repeat(64) },
-    prompt: buildBootstrapPrompt("Reply with the single word: ok"),
+    baseline: harnessBaseline(TREE),
+    task: "Reply with the single word: ok",
     apiKeySource: "SOLVER_API_KEY",
     // The tree ships no skills, but every session installs a `beforeTool` gate, so the hook claim is
     // required regardless of what the tree contains.

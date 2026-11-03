@@ -327,7 +327,7 @@ describe("budget identity", () => {
 
 describe("probe fingerprint", () => {
   const fingerprint = {
-    version: 2,
+    version: 3,
     baseSha: "0".repeat(40),
     dependencyLockHash: "a".repeat(64),
     providerId: "openai-compatible",
@@ -340,6 +340,7 @@ describe("probe fingerprint", () => {
     compiledPromptHash: "c".repeat(64),
     t4Policy: "b1=120000,b2=160000",
     ssotRulesHash: "d".repeat(64),
+    treeSha: "f".repeat(64),
     librarySnapshotHash: "e".repeat(64),
     slices: [],
   } as const
@@ -354,13 +355,19 @@ describe("probe fingerprint", () => {
       false,
       "a v1 record predates the endpoint field and must be regenerated",
     )
-    assert.equal(probeFingerprintSchema.safeParse({ ...fingerprint, version: 3 }).success, false)
+    assert.equal(probeFingerprintSchema.safeParse({ ...fingerprint, version: 4 }).success, false)
   })
 
   it("requires the endpoint and the other freeze fields", () => {
     assert.equal(probeFingerprintSchema.safeParse({ ...fingerprint, baseSha: "abc" }).success, false)
     const { t4Policy: _omitted, ...withoutT4 } = fingerprint
     assert.equal(probeFingerprintSchema.safeParse(withoutT4).success, false)
+    const { treeSha: _noTree, ...withoutTree } = fingerprint
+    assert.equal(
+      probeFingerprintSchema.safeParse(withoutTree).success,
+      false,
+      "a tree change nothing else reads (a skill body) must still move the fingerprint",
+    )
     const { baseUrl: _noEndpoint, ...withoutBaseUrl } = fingerprint
     assert.equal(
       probeFingerprintSchema.safeParse(withoutBaseUrl).success,

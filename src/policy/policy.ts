@@ -119,6 +119,18 @@ export function parseToolPolicy(input: unknown, inventory: ToolInventory): ToolP
  * Sorting across both lists keeps one policy to one value, and the prefixes keep `allow:read` from being
  * confused with `deny:read` by anything that compares strings instead of parsing them.
  */
+/**
+ * The names a policy actually permits.
+ *
+ * Deny wins, so this is not `policy.allow`: rendering a denied name into the system prompt would tell
+ * the model about a tool the gate refuses, and the turn would be spent learning that the prompt lies.
+ */
+export function allowedToolNames(policy: ToolPolicy | undefined): string[] {
+  if (policy === undefined) return []
+  const denied = new Set(policy.deny)
+  return policy.allow.filter((name) => !denied.has(name)).sort(compare)
+}
+
 export function toolPolicySetOf(policy: ToolPolicy | undefined): string[] {
   if (policy === undefined) return [DEFAULT_DENY_MARKER]
   const entries = [

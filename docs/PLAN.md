@@ -14,7 +14,7 @@ end of every chunk so scope survives a context reset.
 | 5 | impl ✓ | Adapter session bootstrap | first chunk that talks to `ClineCore`: build a session from a materialised tree (provider, compiled prompt, tools) | session starts and one turn completes — proven live, in the default `pnpm test` |
 | 6 | impl ✓ | Ledger + artifact store | 4k/3k execution/improvement accounting, JSONL run ledger, probe record persistence | counts are exact and replayable |
 | 7 | impl ✓ | Tool policy + inventory (c2) | tool descriptions as tree files, allow/deny policy set, `toolInventoryHash` | policy actually gates a call |
-| 8 | draft | Prompt compiler (c0/c1) | assemble tree files into the compiled prompt; `compiledPromptHash` | hash changes iff the tree changes |
+| 8 | impl ✓ | Prompt compiler (c0/c1) | assemble tree files into the compiled prompt; `compiledPromptHash` | hash changes iff the tree changes |
 | 9 | draft | Skills mount (c6) | `<cwd>/.cline/skills/<name>/SKILL.md` visibility and its tool-entry budget | costs a tool entry, not file bytes |
 | 10 | draft | Plugin + hooks (c8) | guard plugin via `extensions: [obj]`, hooks that record evidence | hook fires and effect is observable |
 | 11 | draft | Subagent orchestration | child `ClineCore` on the same cwd, excluded from the 4k/3k ledger, contract hooks installed | child budget never counted |
