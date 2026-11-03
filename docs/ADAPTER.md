@@ -926,3 +926,35 @@ and trailing sentence punctuation, because a model that restates a fix as `use r
 stamp would otherwise sort by spelling, not time) and a non-instant is refused. And an empty library now
 *removes* a stale `LongTermMEMORY.md` from the tree instead of leaving the prompt fed with lessons the
 library no longer holds.
+
+## Budget and stop conditions (Chunk 19)
+
+`4k` executions and `3k` improvements, asked as a question before each step rather than reported after it.
+
+1. **The ask comes first.** The ledger already refuses to record an attempt past the limit, but that
+   refusal arrives after the tokens are spent. `mayStartExecution` / `mayStartImprovement` answer "may I
+   start?" against the same `expectedExecutions(k)` / `expectedImprovements(k)` the writer enforces, so the
+   budget stops a run instead of describing one that overran. The arithmetic is imported, never re-derived:
+   a second copy of `4 * k` is a second thing to keep in step.
+2. **Spending the budget is `completed`, not `halted`.** A run that used exactly the executions it was
+   given did what it was asked; a run that gave up is a different record. Only `no-improvement` halts.
+3. **A cycle that learns nothing halts the run.** `lastImprovementAccepted === false` stops with
+   `outcome: "halted"` and reason `no-improvement`, because otherwise the loop repeats the same failing
+   iteration until the budget expires — spending the whole `4k` to produce a file full of identical
+   attempts.
+4. **A failure outranks an expiring budget.** `error` is checked first and produces
+   `outcome: "failed"`; a run that crashed on its last permitted step did not complete.
+5. **Counters are independent.** A full execution budget says nothing about improvements, and vice versa.
+   `remaining()` clamps at zero so a status line built from it cannot report negative headroom.
+
+**What is not done.** This module decides, it does not enforce: a caller that ignores the allowance still
+hits the ledger's `BUDGET_EXCEEDED`, which is the backstop rather than the mechanism. There is no
+wall-clock or token budget — `4k`/`3k` are counts of operations only — and no partial-credit rule for a run
+that stops mid-execution.
+
+**Review fixes folded into this chunk.** `budgetOf` now takes the in-flight counts and adds them, because
+the ledger enforces `finished + open + 1 > limit`: a pre-flight check that only saw finished work would
+allow a step the writer is about to refuse. `stopDecision` also refuses to claim `completed` while an
+operation is still open — `run.finished` rejects that record, so the honest answer is "not yet", close it
+and ask again. And an empty error message now reports `unknown failure` rather than an empty `detail` that
+would read as a normal step.
