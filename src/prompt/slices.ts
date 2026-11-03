@@ -1,6 +1,7 @@
 import { canonicalSha256 } from "../domain/canonical.ts"
 import type { HarnessTree } from "../domain/schemas.ts"
 import { PromptError } from "./errors.ts"
+import type { Skill } from "./skills.ts"
 
 /**
  * Which parts of the tree become system-prompt text, in which order.
@@ -10,7 +11,7 @@ import { PromptError } from "./errors.ts"
  * produce different digests depending on how it was materialised.
  */
 
-export const SLICE_IDS = ["core", "rules", "memory", "instructions"] as const
+export const SLICE_IDS = ["core", "rules", "memory", "instructions", "skills"] as const
 export type SliceId = (typeof SLICE_IDS)[number]
 
 export interface SliceEntry {
@@ -98,6 +99,8 @@ function fileSlice(id: SliceId, entries: readonly SliceEntry[]): RenderedSlice |
 export interface CollectSlicesInput {
   readonly tree: HarnessTree
   readonly allowedTools: readonly string[]
+  /** Skills mounted for this session; they contribute identity and zero characters. */
+  readonly skills?: readonly Skill[]
 }
 
 /**
@@ -120,6 +123,23 @@ export function collectSlices(input: CollectSlicesInput): readonly RenderedSlice
     fileSlice("rules", rules),
     fileSlice("memory", exact("EXPERIENCE.md")),
     fileSlice("instructions", exact("systemprompt.md")),
+    // Zero characters, non-zero identity. The body is never inlined (B1): the built-in `skills` tool
+    // loads it on demand, so a mounted skill costs a tool entry and no always-on bytes. It still has to
+    // appear in `slices`, or two harnesses mounting different skills would compile alike.
+    skillsSlice(input.skills ?? []),
   ]
   return slices.filter((slice): slice is RenderedSlice => slice !== undefined)
+}
+
+function skillsSlice(skills: readonly Skill[]): RenderedSlice | undefined {
+  if (skills.length === 0) return undefined
+  // The definition's body is what identifies the skill; companions are listed by path, and their bytes
+  // are covered by `Skill.sha256` and by the pinned `treeSha`. Nothing here reaches the prompt.
+  const entries = skills.flatMap((skill) => [
+    { path: skill.path, body: skill.body },
+    ...skill.files
+      .filter((path) => path !== skill.path)
+      .map((path) => ({ path, body: "" })),
+  ])
+  return sliceOf("skills", entries, "")
 }

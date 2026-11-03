@@ -76,7 +76,22 @@ function compare(left: string, right: string): number {
  * Sorting and de-duplicating here means `toolPolicySetOf` is a pure projection: two spellings of one
  * policy cannot hash differently, and a fingerprint comparison is not sensitive to list order.
  */
-export function parseToolPolicy(input: unknown, inventory: ToolInventory): ToolPolicy {
+/**
+ * Validate a policy against the inventory and normalise it.
+ *
+ * Sorting and de-duplicating here means `toolPolicySetOf` is a pure projection: two spellings of one
+ * policy cannot hash differently, and a fingerprint comparison is not sensitive to list order.
+ *
+ * `knownTools` is how a runtime built-in becomes nameable. `tools/*.md` under the tree is the inventory
+ * the harness *declares*, but the SDK also exposes tools of its own — the `skills` tool exists because a
+ * skill directory exists, not because a file describes it. Without this parameter a policy could not
+ * allow `skills` at all, so a mounted skill would always be refused.
+ */
+export function parseToolPolicy(
+  input: unknown,
+  inventory: ToolInventory,
+  options: { readonly knownTools?: readonly string[] } = {},
+): ToolPolicy {
   const parsed = toolPolicySchema.safeParse(input)
   if (!parsed.success) {
     const issue = parsed.error.issues[0]
@@ -88,7 +103,10 @@ export function parseToolPolicy(input: unknown, inventory: ToolInventory): ToolP
     )
   }
 
-  const known = new Set(inventory.tools.map((tool) => tool.name))
+  const known = new Set([
+    ...inventory.tools.map((tool) => tool.name),
+    ...(options.knownTools ?? []),
+  ])
   const allow = [...new Set(parsed.data.allow)].sort(compare)
   const deny = [...new Set(parsed.data.deny)].sort(compare)
 

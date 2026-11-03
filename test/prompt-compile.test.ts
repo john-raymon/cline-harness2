@@ -39,7 +39,7 @@ describe("slice assembly", () => {
 
     assert.deepEqual(
       forward.slices.map((slice) => slice.id),
-      ["core", "rules", "memory", "instructions"],
+      ["core", "rules", "memory", "instructions", "skills"],
     )
     assert.equal(backward.compiledPromptHash, forward.compiledPromptHash)
     assert.equal(backward.systemPrompt, forward.systemPrompt)
@@ -88,10 +88,17 @@ describe("prompt identity", () => {
       ...BASE_TREE,
       "README.md": "different readme\n",
       "tools/write_to_file.md": "Write a file.\n",
-      ".cline/skills/pdf/SKILL.md": "# different skill body\n",
     })
     assert.equal(after.compiledPromptHash, before.compiledPromptHash)
     assert.equal(after.alwaysOnChars, before.alwaysOnChars)
+  })
+
+  it("changes it when a mounted skill body changes, without spending a character", () => {
+    const before = compile()
+    const after = compile({ ...BASE_TREE, ".cline/skills/pdf/SKILL.md": "# pdf, edited\n" })
+    assert.notEqual(after.compiledPromptHash, before.compiledPromptHash)
+    assert.equal(after.alwaysOnChars, before.alwaysOnChars)
+    assert.equal(after.systemPrompt, before.systemPrompt)
   })
 
   it("changes it when a file joins a slice or a whole slice appears", () => {

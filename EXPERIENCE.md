@@ -31,4 +31,7 @@ Lessons from traps that actually cost time. One line each: trap → rule.
 - **A caller-owned object is not a snapshot:** `HarnessTree` is a plain object handed in by the caller, and every check is separated from the write by at least one await -> copy it at entry (`{...tree}`) and use the copy, or a mutation during the await writes a harness the fingerprint never described.
 - **Two schemas describing the same value will disagree:** `baselineFingerprintSchema.baseSha` accepted 40 *or* 64 hex characters while `probeFingerprintSchema` accepted only 40 -> share one `gitObjectIdSchema`, or a faithfully captured SHA-256 baseline cannot compose into a fingerprint.
 - **A fence a body can forge is not a boundary:** `<<<path>>>` delimiters stop neighbouring files running together, but a body containing a fence-shaped line can close its own block and impersonate the next file -> refuse `^<<<` at line start in `renderBlock`.
+- **A zero-character slice still needs its bytes in the digest:** the `skills` slice renders no text, so hashing only its entry paths made a `SKILL.md` body edit invisible to `compiledPromptHash` -> keep the definition body in the slice entries; list companions by path and let `Skill.sha256` cover them.
+- **Summing a declared inventory and a built-in double-counts it:** a tree that ships `tools/skills.md` *and* a mounted skill was charged two entries for one tool -> count the union of names, not `tools.length + 1`.
+
 

@@ -3,6 +3,7 @@ import type { HarnessTree } from "../domain/schemas.ts"
 import { ALWAYS_ON_BUDGET_CHARS, assertAlwaysOnBudget } from "./budget.ts"
 import { PromptError } from "./errors.ts"
 import { collectSlices, type SliceId } from "./slices.ts"
+import { collectSkills, type Skill } from "./skills.ts"
 
 /**
  * The prompt a session is started with, compiled from the harness tree.
@@ -88,6 +89,13 @@ export interface CompilePromptInput {
   /** Tools the policy permits; rendered into the core slice and hashed with it. */
   readonly allowedTools?: readonly string[]
   readonly budget?: number
+  /**
+   * Skills already collected by the caller.
+   *
+   * Passing them keeps one collection per session; omitting them makes the compiler collect its own, so
+   * a bare `compilePrompt({ tree, task })` still describes the harness it is given.
+   */
+  readonly skills?: readonly Skill[]
 }
 
 export function compilePrompt(input: CompilePromptInput): CompiledPrompt {
@@ -98,7 +106,11 @@ export function compilePrompt(input: CompilePromptInput): CompiledPrompt {
     )
   }
 
-  const rendered = collectSlices({ tree: input.tree, allowedTools: input.allowedTools ?? [] })
+  const rendered = collectSlices({
+    tree: input.tree,
+    allowedTools: input.allowedTools ?? [],
+    skills: input.skills ?? collectSkills(input.tree).skills,
+  })
   // No separator: every rendered block is newline-terminated, so the join is exact and
   // `alwaysOnChars` stays equal to `systemPrompt.length` instead of drifting by a join cost.
   const systemPrompt = rendered.map((slice) => slice.text).join("")

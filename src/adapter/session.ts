@@ -12,6 +12,12 @@ import {
   type ToolDecision,
   type ToolPolicyInput,
 } from "../policy/policy.ts"
+import {
+  assertToolEntryBudget,
+  collectSkills,
+  declaredToolEntries,
+  SKILLS_TOOL_NAME,
+} from "../prompt/skills.ts"
 import { assertClaimsSatisfied, requiredClaimsFor } from "./claim-gate.ts"
 import { AdapterError } from "./errors.ts"
 import { compilePrompt, PROMPT_SOURCES, type CompiledPrompt } from "../prompt/compile.ts"
@@ -216,17 +222,30 @@ export async function bootstrapSession(
   const tree: HarnessTree = { ...input.baseline.tree }
   const baseline = { ...input.baseline, tree }
 
-  const inventory = buildToolInventory(tree)
-  const policy = input.toolPolicy === undefined ? undefined : parseToolPolicy(input.toolPolicy, inventory)
-  const toolPolicySet = toolPolicySetOf(policy)
-
-  // The tree about to be mounted must be the one the baseline describes. Both values are caller
-  // supplied and both parse, so without this check a session can run harness A and record harness B.
+  // The tree about to be mounted must be the one the baseline describes, and this runs first: every
+  // check below is about *this* harness, so drift has to win over a derived complaint like a bad skill
+  // name or an over-budget tool list. Both values are caller-supplied and both parse, so without this a
+  // session can run harness A while recording harness B.
   verifyHarnessBaseline({
     tree,
     baselineSha: baseline.baselineSha,
     fingerprint: baseline.fingerprint,
   })
+
+  const inventory = buildToolInventory(tree)
+  // A mounted skill is only usable if the policy can name the built-in tool that loads it.
+  const skills = collectSkills(tree)
+  const policy =
+    input.toolPolicy === undefined
+      ? undefined
+      : parseToolPolicy(input.toolPolicy, inventory, {
+          knownTools: skills.skills.length > 0 ? [SKILLS_TOOL_NAME] : [],
+        })
+  const toolPolicySet = toolPolicySetOf(policy)
+
+  // Declared entries, checked before anything is created: every tool entry is always-on context the
+  // model pays for on every request, and a skill costs exactly one of them however many exist.
+  const toolEntries = assertToolEntryBudget(declaredToolEntries(inventory, skills))
 
   // Compiled from the mounted tree, never accepted from the caller, so the prompt, the inventory, the
   // policy and the fingerprint all describe the same harness by construction.
@@ -234,6 +253,7 @@ export async function bootstrapSession(
     tree,
     task: input.task,
     allowedTools: allowedToolNames(policy),
+    skills: skills.skills,
   })
 
   // Composition happens here, before any directory exists: a fingerprint with a hole in it is a reason
@@ -345,7 +365,7 @@ export async function bootstrapSession(
       promptSha256: prompt.sha256,
       compiledPromptHash: prompt.compiledPromptHash,
       probeFingerprintSha256: probeFingerprintSha256(fingerprint),
-      declaredToolEntries: inventory.tools.length,
+      declaredToolEntries: toolEntries,
       toolPolicySet,
       toolInventoryHash: inventory.hash,
       toolDecisions,

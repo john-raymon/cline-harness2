@@ -9,6 +9,8 @@ export type PromptErrorCode =
   | "PROMPT_BUDGET_INVALID"
   | "PROMPT_TOO_LARGE"
   | "PROMPT_SLICE_INVALID"
+  | "SKILL_INVALID"
+  | "TOOL_ENTRY_BUDGET_EXCEEDED"
 
 export class PromptError extends Error {
   override readonly name = "PromptError"

@@ -399,6 +399,37 @@ faithfully captured SHA-256 baseline could not compose.
 assumed, since the fingerprint records them; whether `@cline/core` honours either is not established by
 any claim in this file.
 
+## Skills mount (Chunk 9)
+
+Gate: "costs a tool entry, not file bytes". `collectSkills` reads `.cline/skills/<name>/**`: a directory
+holding a non-empty `SKILL.md`, with companions (`references/`, `scripts/`) allowed and folded into the
+skill's identity — they are bytes the model can load on demand, so they belong to what the harness
+mounted even though they never reach the prompt. A file directly under `.cline/skills/`, a directory
+without `SKILL.md`, and an unusable name are all `SKILL_INVALID`, because each one is a mount the
+operator believes in and the runtime ignores.
+
+**A mounted skill is a zero-character slice.** It appears in `prompt.slices` with `text: ""`, the
+`SKILL.md` paths in `paths`, and a digest over the definition body plus the companion paths — so a skill
+edit moves `compiledPromptHash` and `probeFingerprintSha256` while `systemPrompt` and `alwaysOnChars` are
+byte-identical. That is the gate stated as a test: three 30,000-character skill bodies compile under the
+24,000-character budget, and the same bytes in a `systemprompt.md` fail with `PROMPT_TOO_LARGE`.
+
+**One entry, never `skills.length`.** `declaredToolEntries` is the *union* of the inventory names and
+`skills`, so forty skills cost one entry and a tree that already declares `tools/skills.md` is not charged
+twice. `assertToolEntryBudget` (64) runs in `bootstrapSession` before anything is created, and the number
+is recorded in the v3 record.
+
+**A policy can now name the built-in.** `parseToolPolicy` takes `knownTools`, and the session passes
+`["skills"]` when skills are mounted. Without it, Chunk 7's "a policy may only name tools the tree
+defines" made `allow: ["skills"]` impossible — the inventory describes what the tree *declares*, and the
+`skills` tool exists because a directory exists. The parameter is deliberately narrow: it names one
+runtime built-in, it does not open the inventory.
+
+**The live gate is `test/adapter-skills-gate.test.ts`**, one real session against a scripted provider: the
+skill name reaches the request, the built-in `skills` tool is present, and the body's unique marker does
+*not* appear. `verifyHarnessBaseline` runs before skills, inventory and budget checks, so drift is
+reported as drift rather than as a derived complaint about the wrong harness.
+
 ## Known debt carried forward
 
 - **The tree store assumes it owns the directory.** `materialiseTree` claims a non-existent leaf with
@@ -494,5 +525,18 @@ any claim in this file.
 - **`B5.hooks` is now a hard dependency of every session.** A machine that has never run `pnpm spike:sdk`
   cannot start one, even with default-deny tools, because the deny is itself a hook decision. That is the
   intended fail-closed line; the alternative is trusting an unverified gate.
+- **Skill discovery is the SDK's, not the tree's.** The pinned SDK also reads global skill directories
+  (`~/.cline/skills`, `~/.agents/skills`), so a session can load instructions the baseline never captured
+  while its fingerprint is unchanged — `treeSha` covers only what capture froze. The live gate isolates
+  `HOME`/`XDG_*` and proves the mounted skill is visible and not inlined; it cannot prove ambient skills
+  are unreachable. `B1` also recorded that an empty `config.skills` still shows a mounted skill, so the
+  allowlist is not a visibility gate. Real isolation needs the sandbox layer.
+- **"Not inlined" is measured; "returned on demand" is not.** The gate asserts the `skills` tool is
+  present and the body marker is absent from the request, which is what `B1` established. Invoking the
+  tool would additionally prove the body comes back, but no claim pins its input schema, and guessing one
+  in a test would encode a guess as evidence.
+- **Skill frontmatter is not modelled.** `collectSkills` treats every directory with a non-empty
+  `SKILL.md` as mounted; the SDK's `disabled:` flag and `name:` overrides are ignored, so a disabled skill
+  is still counted and a renamed one may collide with another directory's name.
 
 
