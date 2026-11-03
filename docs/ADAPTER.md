@@ -574,3 +574,50 @@ phases fired, `events > 0`, the marker does not exist, and `afterToolOnSkipped >
   is still counted and a renamed one may collide with another directory's name.
 
 
+
+### 11. Subagents
+
+`spawn_subagent` is a real tool, not a harness-side shortcut. The parent registers it through
+`extraTools` — the same surface `B6.subagent` verified — and its `execute` calls `spawnSubagent`, which
+creates a second `ClineCore` on the parent's materialised `harnessDir`. A model that asks for a helper gets
+one through the same path a test does.
+
+The child does not inherit the parent's safety by default, so three things are rebuilt rather than passed
+down: the policy hooks (`recordingHooks` with a fresh recorder), the contract plugin, and a config with
+`extraTools: []`. The child's policy is the parent's *parsed* policy minus `spawn_subagent`, which is added
+to `deny` — deny wins, so recursion is an explicit refusal in the child's own record instead of an
+unnamed "not-allowed". Re-parsing the raw input on the child would throw `POLICY_UNKNOWN_TOOL`, because a
+child config cannot name a tool its inventory does not declare.
+
+Budget isolation is a property of the files, not a convention. `spawnSubagent` never opens the parent
+ledger; the child gets `<runDir>/subagents/<childRunId>/ledger.jsonl` and writes a full lifecycle there
+(`run.started`, one `execution.started`/`attempt.recorded`, `execution.finished`, `run.finished`) inside a
+`try/finally`, so a child that throws still closes its ledger with a terminal event. The parent's file stays
+byte-identical, which is what "child budget never counted" means in practice.
+
+The child is created with `backendMode: "local"`, the same choice the parent makes. This is not cosmetic:
+`B6.subagent` recorded the spawn against the local backend, and the SDK's auto-discovered hub forwards hooks
+but drops inline `localRuntime.extensions`, so a child on the wrong backend would run without the contract
+plugin built for it. The child is also created with its own `distinctId`, so telemetry stays attributable to
+the child rather than to the parent's run.
+
+Budget is one absolute instant, computed before the child directory exists: `Math.min` of an explicit
+`timeoutMs` and the parent's remaining time, falling back to ten minutes when neither is known. An explicit
+timeout can therefore shorten a child but never extend it past what the parent has left, and a child with no
+budget is refused with `SUBAGENT_BUDGET_EXHAUSTED` before anything is created. Setup time is charged to the
+same deadline, not to a fresh timer.
+
+The parent's `AbortSignal` is passed down as well, and an abort asks the child runtime to abort the session
+by id instead of only stopping the wait. Teardown is bounded (`abort` then `dispose`, both raced against a
+ten-second limit) and runs *before* the terminal ledger events, so a still-running child cannot keep writing
+into the workspace while its record says the run is over.
+A failed spawn is reported to the model as `{ok: false, error}` rather than thrown: a helper that could not
+start is a failed helper, not a failed run.
+
+**Debt.** `B6.subagent` proved the shape (an `extraTools` entry can create its own core on the same `cwd`),
+not the semantics. No claim establishes that a child's tool calls are attributable to it — the seven ledger
+event kinds carry no child provenance — so the accounting here is per-file, not per-event. The suite
+exercises this through the real tool object with a fake SDK underneath; there is no live child gate yet, so
+what remains unproven is that a real provider round-trip through `spawn_subagent` behaves like the fake.
+`maxIterations` defaults to 4 for children without a claim behind that number, and the child's
+`promptSha256` is the parent's compiled prompt because no separate child prompt is compiled.

@@ -28,6 +28,7 @@ export const HOOKS_CLAIM_ID = "B5.hooks"
  * session would run believing it installed a guard, and the record would say the same.
  */
 export const PLUGIN_CLAIM_ID = "B2.plugin"
+export const SUBAGENT_CLAIM_ID = "B6.subagent"
 export const SKILLS_TREE_PREFIX = ".cline/skills/"
 
 /**
@@ -78,7 +79,10 @@ export interface ClaimGateReport {
  * tree that ships skills also depends on `B1.skills` — the claim that discovery happens at all and that
  * an allowlist is not the gate.
  */
-export function requiredClaimsFor(tree: HarnessTree): readonly string[] {
+export function requiredClaimsFor(
+  tree: HarnessTree,
+  options: { readonly subagents?: boolean } = {},
+): readonly string[] {
   const claims: string[] = [HOOKS_CLAIM_ID, PLUGIN_CLAIM_ID]
   for (const key of Object.keys(tree)) {
     if (key.startsWith(SKILLS_TREE_PREFIX) && key.length > SKILLS_TREE_PREFIX.length) {
@@ -86,6 +90,8 @@ export function requiredClaimsFor(tree: HarnessTree): readonly string[] {
       break
     }
   }
+  // Opt-in: a harness that never spawns a helper must not be refused by a runtime that cannot spawn one.
+  if (options.subagents === true) claims.push(SUBAGENT_CLAIM_ID)
   return claims
 }
 

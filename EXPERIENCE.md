@@ -38,3 +38,6 @@ Lessons from traps that actually cost time. One line each: trap → rule.
 
 
 
+- **`run.finished` totals are re-derived, not trusted:** a child ledger that reported `physicalAttempts: 1` with no execution events failed replay with "totals disagree" -> write the real lifecycle (`execution.started`, `attempt.recorded`, `execution.finished`) before the terminal event.
+- **A rejected start promise nobody awaits crashes the parent:** aborting a child before `withDeadline` registers its guard left the start rejection unhandled and node:test failed the run -> attach `start.catch(() => undefined)` the moment the promise exists, before any early return.
+- **`ClineCore.create({})` is not the same runtime as the parent's:** auto-discovered hub drops inline `localRuntime.extensions`, so a spawned child silently lost its contract plugin -> pass `backendMode: "local"` (plus `clientName` and a per-child `distinctId`) exactly as the parent does.

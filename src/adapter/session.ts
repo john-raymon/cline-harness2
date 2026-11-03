@@ -29,6 +29,7 @@ import {
 } from "../prompt/skills.ts"
 import { assertClaimsSatisfied, requiredClaimsFor } from "./claim-gate.ts"
 import { AdapterError } from "./errors.ts"
+import { SUBAGENT_TOOL_NAME, spawnSubagent, spawnToolDefinition } from "../subagent/spawn.ts"
 import { compilePrompt, PROMPT_SOURCES, type CompiledPrompt } from "../prompt/compile.ts"
 import {
   composeProbeFingerprint,
@@ -132,6 +133,13 @@ export interface SessionBootstrapInput {
    */
   readonly toolPolicy?: ToolPolicyInput
   readonly maxIterations?: number
+  /**
+   * Register `spawn_subagent` and require `B6.subagent`.
+   *
+   * Opt-in rather than always-on: the tool costs a declared entry, and a harness that never delegates should
+   * not be refused by a runtime without a verified spawn path.
+   */
+  readonly subagents?: boolean
   readonly deps?: SessionDeps
 }
 
@@ -269,19 +277,28 @@ export async function bootstrapSession(
   // A mounted skill and the contract tool are only nameable if the policy knows they exist: one comes
   // from a directory, the other from the plugin this session installs.
   const skills = collectSkills(tree)
+  const subagentToolName = input.subagents === true ? SUBAGENT_TOOL_NAME : undefined
+  const extraKnownTools =
+    subagentToolName === undefined
+      ? [SKILLS_TOOL_NAME, CONTRACT_TOOL_NAME]
+      : [SKILLS_TOOL_NAME, CONTRACT_TOOL_NAME, subagentToolName]
   const policy =
     input.toolPolicy === undefined
       ? undefined
-      : parseToolPolicy(input.toolPolicy, inventory, {
-          knownTools: [SKILLS_TOOL_NAME, CONTRACT_TOOL_NAME],
-        })
+      : parseToolPolicy(input.toolPolicy, inventory, { knownTools: extraKnownTools })
   const toolPolicySet = toolPolicySetOf(policy)
 
   // Declared entries, checked before anything is created: every tool entry is always-on context the
   // model pays for on every request. A skill and the contract tool each cost exactly one, and the count
   // is a union so a tree that already declares one is not charged twice.
   const toolEntries = assertToolEntryBudget(
-    declaredToolEntries(inventory, skills, [CONTRACT_TOOL_NAME]),
+    declaredToolEntries(
+      inventory,
+      skills,
+      subagentToolName === undefined
+        ? [CONTRACT_TOOL_NAME]
+        : [CONTRACT_TOOL_NAME, subagentToolName],
+    ),
   )
 
   // Compiled from the mounted tree, never accepted from the caller, so the prompt, the inventory, the
@@ -324,7 +341,7 @@ export async function bootstrapSession(
   await assertClaimsSatisfied({
     evidencePath: input.evidencePath,
     installedSdkVersion: input.installedSdkVersion,
-    requiredClaims: requiredClaimsFor(tree),
+    requiredClaims: requiredClaimsFor(tree, { subagents: input.subagents === true }),
   })
 
   const runId = input.runId ?? newRunId(startedAt, deps.random)
@@ -382,6 +399,38 @@ export async function bootstrapSession(
       )
     }
 
+    // A closure over *this* session's parent facts, so no process-global state decides what a spawn means and
+    // two sessions running in one process cannot spawn under each other's paths.
+    const extraTools: unknown[] = []
+    if (subagentToolName !== undefined) {
+      extraTools.push(
+        spawnToolDefinition(async ({ task }) =>
+        spawnSubagent({
+          parent: {
+            harnessDir: prepared.harnessDir,
+            runDir: prepared.runDir,
+            config: input.config,
+            toolPolicy: policy,
+            baselineSha: input.baseline.baselineSha,
+            promptSha256: prompt.sha256,
+            toolPolicySet,
+            toolInventoryHash: inventory.hash,
+            apiKey,
+            apiKeySource: input.apiKeySource,
+            evidencePath: input.evidencePath,
+            installedSdkVersion: input.installedSdkVersion,
+            // Recomputed per spawn: a helper asked for late in a run gets what is actually left.
+            remainingMs: Math.max(1, timeoutMs - (now().getTime() - startedAt.getTime())),
+            signal: input.signal,
+            maxIterations: input.maxIterations ?? DEFAULT_MAX_ITERATIONS,
+          },
+          task,
+          deps: input.deps?.loadSdk === undefined ? {} : { loadSdk: input.deps.loadSdk },
+        }),
+        ),
+      )
+    }
+
     const raw = await startWithDeadline({
       core,
       sessionId: runId,
@@ -396,6 +445,7 @@ export async function bootstrapSession(
           maxIterations: input.maxIterations ?? DEFAULT_MAX_ITERATIONS,
           hooks: hooks.hooks,
           extensions: [contractPlugin],
+          extraTools,
         }),
       },
       timeoutMs,
@@ -574,6 +624,7 @@ function sessionConfig(input: {
   maxIterations: number
   hooks: unknown
   extensions: readonly unknown[]
+  extraTools: readonly unknown[]
 }): Record<string, unknown> {
   return {
     sessionId: input.runId,
@@ -586,6 +637,9 @@ function sessionConfig(input: {
     systemPrompt: input.prompt.systemPrompt,
     // `B2.plugin`: `pluginPaths` registered nothing, an object passed here registers its tool and rule.
     extensions: input.extensions,
+    // `B6.subagent`: an `extraTools` entry that creates its own core really runs a child on the same `cwd`.
+    // Empty unless this session may delegate, so a child can never recurse.
+    extraTools: input.extraTools,
     // Sent rather than assumed: the fingerprint records these values, so a value the provider default
     // silently overrode would make the record claim a setting the run never used.
     reasoningEffort: DEFAULT_REASONING_EFFORT,
