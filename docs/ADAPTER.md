@@ -958,3 +958,39 @@ allow a step the writer is about to refuse. `stopDecision` also refuses to claim
 operation is still open — `run.finished` rejects that record, so the honest answer is "not yet", close it
 and ask again. And an empty error message now reports `unknown failure` rather than an empty `detail` that
 would read as a normal step.
+
+## CLI (Chunk 20)
+
+`harness2 <task>` and nothing else. Every knob below the task has a default from `src/config.ts`.
+
+1. **A task is the only required argument.** `harness2 "fix the failing test"` runs with `k=1`, the T4
+   thresholds, the provider, the model and `arbitration=off` all resolved from `config.ts`. `--b1-tokens`
+   and friends exist for experiments, never for ordinary use. The task can also be `--task "..."`, and
+   `--` forces the rest of the line to be treated as task text (so a prompt may contain flag-shaped words).
+2. **`--repo` defaults to `process.cwd()`**, and it is also the default `--root`, so a run's files land
+   next to the workspace instead of wherever the shell was pointed.
+3. **Help is generated from `CONFIG_KEYS`.** Every line comes from the same spec the parser reads and the
+   same `defaultFor` the resolver applies, so a flag cannot exist undocumented and a documented default
+   cannot differ from the one that gets used. API keys render as `unset` — never a value, never a
+   placeholder that looks like one.
+4. **Exit codes are distinct:** `0` completed, `1` failed, `2` the invocation was wrong (unknown flag,
+   bad config, no task), `3` halted deliberately. A `no-improvement` stop is not a crash, and collapsing
+   the two would hide the difference between "gave up" and "broke".
+5. **`--dry-run` resolves everything and runs nothing.** It is how you check what the environment will do
+   without spending a token; it also names where each value came from (`default`, `env`, `cli`).
+6. **Nothing claims a run it did not perform.** If this build has no executor wired, the CLI prints the
+   plan and exits `2` saying so, rather than exit `0` over a run that never happened.
+
+**Entry points.** `bin/harness2.mjs` re-execs `node --import tsx src/cli-main.ts`, so the CLI runs under
+`register()` from `module` — the deprecated loader path that tsx rejects in Node 23 — while `src/cli.ts`
+stays importable and side-effect free for tests.
+
+**What is not done.** The CLI does not start a run yet: wiring `execute` to the end-to-end pipeline is
+Chunk 21. There is no config file (env and flags only), no shell completion, and no `--json` output.
+
+**Review fixes folded into this chunk.** `--repo` no longer seeds `cli.root`: the working directory already
+makes the workspace the default root, and seeding a flag nobody typed outranked `HARNESS2_ROOT`. A
+task that is given both ways (`--task x` plus positional words) is refused instead of one being dropped. A
+flag whose value looks like the next flag (`--repo --dry-run`) reports a missing value rather than taking
+the flag as a path and disabling a mode. A whitespace-only task is refused. A single-dash token is an
+unknown flag rather than a task word — `--` is how you pass a prompt that begins with a dash.

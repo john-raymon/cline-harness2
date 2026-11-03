@@ -5,8 +5,12 @@
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",
     "test": "node --import tsx --test test/*.test.ts",
+    "cli": "node bin/harness2.mjs",
     "oracle:live": "HARNESS2_LIVE_ORACLE=on node --import tsx --test test/oracle-live.test.ts",
     "spike:sdk": "node --import tsx spikes/sdk.ts"
+  },
+  "bin": {
+    "harness2": "bin/harness2.mjs"
   },
   "keywords": [],
   "author": "",

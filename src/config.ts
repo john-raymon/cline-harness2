@@ -415,7 +415,7 @@ function resolveApiKeySource(
   return "absent"
 }
 
-function defaultFor(key: keyof RawConfig, cwd: string): unknown {
+export function defaultFor(key: keyof RawConfig, cwd: string): unknown {
   switch (key) {
     case "k":
       return DEFAULT_K
