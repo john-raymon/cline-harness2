@@ -813,3 +813,39 @@ and a human or a later chunk owns the judgement. There is no retry and no tie-br
 three-way problem is out of scope. `probe` also costs a second call per question with no rate limiting,
 and the ledger has no way to list the arbitrations a run holds — they are counted nowhere by design, so
 finding them means reading the file.
+
+## Improver loop (Chunk 16)
+
+`proposeImprovement` asks the Improver with the whole harness and the run's evidence as raw files, and
+then treats the answer as untrusted input.
+
+1. **The reply format is a contract, not a suggestion.** A proposal is one block per changed file:
+   `<<<proposal:PATH>>>` … `<<<end proposal:PATH>>>`, with a body of a single `DELETE` line meaning
+   removal. Prose is `PROPOSAL_UNPARSEABLE`. A block that is never closed, a closer that disagrees with
+   its opener, two blocks for one path, a *stray* fence line outside any block (a typo'd opener would
+   otherwise drop a whole file from the patch) and a body containing a line beginning with `<<<` are all
+   refusals. Reading meaning out of a paragraph is how a patch becomes a surprise, and this is the only
+   path by which model output reaches a harness.
+2. **The format spec is written with its delimiters inline.** The oracle client refuses a *question*
+   containing a line that starts with `<<<` (Chunk 14), so the ask describes the fences as
+   `` `<<<proposal:PATH>>>` `` mid-sentence. Relaxing that guard to carry the spec would have reopened
+   the hole it closes; the spec was written to fit instead.
+3. **A refusal is a result, not an exception.** `PROPOSAL_*` codes come back as
+   `{status: "refused", code, reason}` so a run records a bad proposal and carries on. Transport
+   failures still throw, because those are the oracle's problem, not the proposal's.
+4. **"Patches, not rewrites" is one checkable rule.** A proposal that changes *every existing* file in a
+   tree of two or more is `PROPOSAL_TOO_BROAD`: nothing is left that a reviewer could reject selectively,
+   which is what makes it a replacement wearing a patch's clothes. The count is of touched *existing*
+   files, so adding a new file cannot mask a rewrite of all the others. A one-file harness cannot be too
+   broad by definition. Separately, a patch that changes nothing is `PROPOSAL_EMPTY`, one that deletes
+   every file is `PROPOSAL_EMPTIES_TREE` — an empty harness is not an improvement — and the patch returned
+   to the caller holds only the paths that actually changed, so `patch` and `changed` cannot disagree.
+5. **Ordering is fixed so prompt bytes are reproducible.** `harnessEntries` sorts by path, and the
+   evidence follows the tree, so the same tree and the same evidence produce the same prompt.
+
+**What is not done.** Nothing here decides whether a proposal is *good*: the Selector (Chunk 17) compares
+candidates under a matched fingerprint, and until then `e_{k+1}` is simply the patch applied. No proposal
+is recorded in the ledger yet — `improvement.started`/`improvement.finished` belong to the loop that owns
+the budget, and a proposal that is refused mid-iteration must not be counted as an improvement. The
+`DELETE` sentinel is also a real hazard: a file whose entire content is the word `DELETE` cannot be
+proposed through this format.
