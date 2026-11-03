@@ -121,7 +121,10 @@ export function collectSlices(input: CollectSlicesInput): readonly RenderedSlice
   const slices: (RenderedSlice | undefined)[] = [
     sliceOf("core", [], coreSliceText(input.allowedTools)),
     fileSlice("rules", rules),
-    fileSlice("memory", exact("EXPERIENCE.md")),
+    // Both memory files are hand-authored or library-rendered text about *this* harness: EXPERIENCE.md
+    // is written by people, LongTermMEMORY.md by the lesson library. Same slice, because they answer the
+    // same question at prompt time and splitting them would buy nothing but another digest.
+    fileSlice("memory", [...exact("EXPERIENCE.md"), ...exact("LongTermMEMORY.md")]),
     fileSlice("instructions", exact("systemprompt.md")),
     // Zero characters, non-zero identity. The body is never inlined (B1): the built-in `skills` tool
     // loads it on demand, so a mounted skill costs a tool entry and no always-on bytes. It still has to

@@ -888,3 +888,41 @@ refused instead of resolving to whichever came first. Both digests are validated
 compared — two empty strings would otherwise have "matched" and let an unmeasured probe through the gate
 this chunk exists for. And a reflection's refusal carries its own code instead of the caller inferring it
 from the wording of a message.
+
+## Lesson library (Chunk 18)
+
+The library is a list of claims, and it is defined by refusing to grow.
+
+1. **Identity is the claim, not the evidence.** `lessonKey` is the digest of the normalised `cue` and
+   `lesson` (whitespace collapsed, case folded). A second reflection that reaches the same situation and
+   the same operation is a duplicate even if it cites different rows — evidence is what an entry quotes,
+   not what identifies it. Filing the same fix once per run would build a library of copies that all look
+   like independent confirmations.
+2. **A duplicate never rewrites the entry.** Even a higher-confidence restatement leaves the original
+   alone: rewriting it would erase the evidence that entry cited. The caller records
+   `outcome: "duplicate"` and moves on.
+3. **The cap is a count, not a budget.** `LESSON_LIBRARY_CAP` is 120 entries, because the rendered library
+   reaches the prompt through the `memory` slice and has no other limit. Eviction is deterministic —
+   lowest confidence, then oldest, then key — so two machines with the same library drop the same entry.
+4. **`LongTermMEMORY.md` is the memory slice.** `applyLessonLibrary` writes the render into the tree at
+   `LESSON_LIBRARY_PATH`, and `collectSlices` now reads `EXPERIENCE.md` *and* `LongTermMEMORY.md` into
+   `memory`: hand-written memory and library-rendered memory answer the same question at prompt time, so
+   splitting them would buy nothing but another digest.
+5. **Rendering is deterministic and line-safe.** Bullets are ordered by confidence then by key (never by
+   insertion), and every field is collapsed onto one line, so a lesson whose `cue` contains a newline
+   cannot forge a second bullet.
+
+**What is not done.** The library is not persisted by this chunk — it is a value, and writing it is the
+caller's job until the end-to-end run owns a run directory. There is no semantic dedupe: two lessons that
+mean the same thing in different words are two entries, because deciding that they are the same needs the
+thing this chunk does not have, a judge. `isUsableLesson` is not consulted on add, since the schema already
+requires every field to be non-empty.
+
+**Review fixes folded into this chunk.** A lesson that arrives at a full library and ranks last is now
+`outcome: "dropped"` with the library unchanged — previously it was reported as `added` while the library
+ten dropped it again, which is a filing that never happened. Dedupe normalisation now also folds backticks
+and trailing sentence punctuation, because a model that restates a fix as `use rules/x.md.` instead of
+`use rules/x.md` must not get a second entry. The filing instant is canonicalised to UTC (an `+01:00`
+stamp would otherwise sort by spelling, not time) and a non-instant is refused. And an empty library now
+*removes* a stale `LongTermMEMORY.md` from the tree instead of leaving the prompt fed with lessons the
+library no longer holds.

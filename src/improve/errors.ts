@@ -17,6 +17,7 @@ export type ImproveErrorCode =
   | "SELECTION_UNKNOWN_CANDIDATE"
   | "REFLECTION_UNPARSEABLE"
   | "REFLECTION_INCOMPLETE"
+  | "LIBRARY_INVALID"
 
 export class ImproveError extends Error {
   override readonly name = "ImproveError"
