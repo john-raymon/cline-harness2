@@ -21,6 +21,13 @@ import { AdapterError } from "./errors.ts"
 export const SPIKE_EVIDENCE_PATH = ".tmp/spike-evidence.json"
 export const SKILLS_CLAIM_ID = "B1.skills"
 export const HOOKS_CLAIM_ID = "B5.hooks"
+/**
+ * `B2.plugin` is unconditional because every session injects the contract plugin.
+ *
+ * It is the claim that `extensions: [obj]` registers the plugin's tool and rule at all; without it the
+ * session would run believing it installed a guard, and the record would say the same.
+ */
+export const PLUGIN_CLAIM_ID = "B2.plugin"
 export const SKILLS_TREE_PREFIX = ".cline/skills/"
 
 /**
@@ -72,7 +79,7 @@ export interface ClaimGateReport {
  * an allowlist is not the gate.
  */
 export function requiredClaimsFor(tree: HarnessTree): readonly string[] {
-  const claims: string[] = [HOOKS_CLAIM_ID]
+  const claims: string[] = [HOOKS_CLAIM_ID, PLUGIN_CLAIM_ID]
   for (const key of Object.keys(tree)) {
     if (key.startsWith(SKILLS_TREE_PREFIX) && key.length > SKILLS_TREE_PREFIX.length) {
       claims.push(SKILLS_CLAIM_ID)

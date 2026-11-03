@@ -79,7 +79,7 @@ describe("the skills mount, live", () => {
     assert.equal(payload.bodyMarkerSeen, false, "the skill body must not be inlined into the request")
 
     // One entry for the built-in tool, and the policy that allows it is recorded verbatim.
-    assert.equal(record.declaredToolEntries, 1)
+    assert.equal(record.declaredToolEntries, 2)
     assert.deepEqual(record.toolPolicySet, ["allow:skills"])
     assert.equal(payload.providerRequests, 1)
   })

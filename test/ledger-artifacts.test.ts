@@ -38,7 +38,7 @@ afterEach(async () => {
 
 function sampleRecord(overrides: Partial<SessionBootstrapRecord> = {}): SessionBootstrapRecord {
   return sessionBootstrapRecordSchema.parse({
-    version: 3,
+    version: 4,
     runId: "run-1",
     runDir: "/tmp/run-1",
     harnessDir: "/tmp/run-1/harness",
@@ -52,7 +52,21 @@ function sampleRecord(overrides: Partial<SessionBootstrapRecord> = {}): SessionB
     promptSha256: SHA_A,
     compiledPromptHash: SHA_A,
     probeFingerprintSha256: SHA_A,
-    declaredToolEntries: 0,
+    declaredToolEntries: 1,
+    contractPlugin: {
+      name: "harness2-contract",
+      tools: ["harness_contract"],
+      rules: ["harness2.contract"],
+      ruleSha256: SHA_A,
+    },
+    hookEvidence: {
+      beforeRun: 1,
+      afterRun: 1,
+      beforeTool: 1,
+      afterTool: 1,
+      events: 3,
+      afterToolOnSkipped: 0,
+    },
     toolPolicySet: ["default:deny"],
     toolInventoryHash: SHA_A,
     toolDecisions: [],

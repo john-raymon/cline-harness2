@@ -430,6 +430,40 @@ skill name reaches the request, the built-in `skills` tool is present, and the b
 *not* appear. `verifyHarnessBaseline` runs before skills, inventory and budget checks, so drift is
 reported as drift rather than as a derived complaint about the wrong harness.
 
+## Contract plugin and hook evidence (Chunk 10)
+
+`extensions: [obj]` is the loader, because `B2.plugin` established that `pluginPaths` registers nothing.
+`src/plugin/contract.ts` builds one **fixed** plugin — name `harness2-contract`, tool `harness_contract`,
+rule `harness2.contract` — and the session injects it. There is no plugin loader: a candidate pipeline needs
+a trust model and an import sandbox, and neither exists yet.
+
+**`createTool` is injected, never imported.** `src/plugin/contract.ts` has no `@cline/sdk` import, so the
+module can be unit-tested and pre-flight never initialises SDK state. The plugin is built and validated
+**before** `createCore`, because `createTool` is all it needs and a failing plugin must not leave an
+undisposed runtime behind.
+
+**The validation-only load is the only place an over-claim is visible.** `validateContractPlugin` requires
+capabilities to equal exactly `["tools","rules"]`, runs `setup` against a recording stub, refuses an unnamed
+or duplicate tool, an id-less or content-less or duplicate rule, and a declared-but-unregistered tool or
+rule (`PLUGIN_TOOL_MISSING` / `PLUGIN_RULE_MISSING`). `B2` recorded that the SDK accepts an over-claiming
+manifest silently; the live gate is what proves the runtime then accepted the real object.
+
+**`afterTool` is counted, never believed.** `recordingHooks` wraps `policyHooks` and passes the gate's
+verdict through unchanged — a recorder that normalised it would be a policy change hiding as instrumentation.
+It counts each phase, and `afterToolOnSkipped` counts `afterTool` calls whose `beforeTool` was refused, which
+is the documented lie from this file's contract section. Calls are paired by **identity**
+(`toolCall.id`, `callId` or `toolCallId`), and a skip is consumed on first use, because a lingering key would
+make the next allowed call look like a lie the runtime never told.
+
+`B2.plugin` is now required unconditionally by the claim gate, alongside `B5.hooks`; record **v4** adds
+`contractPlugin {name, tools, rules, ruleSha256}` and `hookEvidence`, and `declaredToolEntries` counts the
+contract tool as one entry (unioned with the tree's `tools/` names, so a tree that already declares it is not
+charged twice).
+
+**Live gate: `test/adapter-plugin-gate.test.ts`.** One real session, policy denies `run_commands`, provider
+scripted to `touch` a marker: the rule marker reaches the request, `harness_contract` is in `tools`, all four
+phases fired, `events > 0`, the marker does not exist, and `afterToolOnSkipped >= 1`.
+
 ## Known debt carried forward
 
 - **The tree store assumes it owns the directory.** `materialiseTree` claims a non-existent leaf with

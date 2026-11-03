@@ -54,3 +54,97 @@ export function policyHooks(input: PolicyHookInput): ToolGateHooks {
     },
   }
 }
+
+/**
+ * Hook evidence, wrapped around the gate rather than in place of it.
+ *
+ * `B5.hooks` recorded that all four phases fire, and that `afterTool` fires **even for a call the gate
+ * skipped**. So `afterTool` is never evidence that a tool ran: this recorder counts those cases
+ * separately (`afterToolOnSkipped`) instead of letting a phase counter imply a side effect.
+ *
+ * The gate's return value is passed through untouched — a recorder that normalised it would either
+ * open the gate or make it stricter, and both would be a policy change hiding as instrumentation.
+ */
+export interface HookEvidenceSummary {
+  readonly beforeRun: number
+  readonly afterRun: number
+  readonly beforeTool: number
+  readonly afterTool: number
+  readonly events: number
+  /** `afterTool` calls whose `beforeTool` was skipped: the runtime's documented lie. */
+  readonly afterToolOnSkipped: number
+}
+
+export interface HookRecorder {
+  readonly hooks: Record<string, unknown>
+  summary(): HookEvidenceSummary
+}
+
+/**
+ * Identify one call attempt.
+ *
+ * `afterTool` has no dependable ordering relative to `beforeTool` for *different* calls, so the pairing
+ * has to be by identity. `toolCall.id` when the runtime supplies one, then name, then a positional
+ * fallback — a name-only key would mis-attribute two concurrent calls to the same tool.
+ */
+export function callKeyOf(context: unknown, fallback: number): string {
+  if (typeof context !== "object" || context === null) return `#${String(fallback)}`
+  const ctx = context as {
+    toolCall?: { id?: unknown; callId?: unknown; toolCallId?: unknown; name?: unknown; toolName?: unknown }
+  }
+  for (const candidate of [ctx.toolCall?.id, ctx.toolCall?.callId, ctx.toolCall?.toolCallId]) {
+    if (typeof candidate === "string" && candidate.length > 0) return `id:${candidate}`
+  }
+  const name = toolNameOf(context)
+  return name.length > 0 ? `name:${name}` : `#${String(fallback)}`
+}
+
+export function recordingHooks(input: PolicyHookInput): HookRecorder {
+  const gate = policyHooks(input)
+  const counters = { beforeRun: 0, afterRun: 0, beforeTool: 0, afterTool: 0, events: 0, skipped: 0 }
+  const skipped = new Set<string>()
+  let attempts = 0
+
+  return {
+    hooks: {
+      beforeRun: () => {
+        counters.beforeRun += 1
+        return undefined
+      },
+      afterRun: () => {
+        counters.afterRun += 1
+        return undefined
+      },
+      beforeTool: (context: unknown) => {
+        counters.beforeTool += 1
+        attempts += 1
+        const verdict = gate.beforeTool(context)
+        // Only a `skip: true` is a refusal. Any other shape is not this harness's vocabulary, and
+        // treating "not undefined" as skipped would count a future advisory return as a refusal.
+        if ((verdict as { skip?: unknown } | undefined)?.skip === true) {
+          skipped.add(callKeyOf(context, attempts))
+        }
+        return verdict
+      },
+      afterTool: (context: unknown) => {
+        counters.afterTool += 1
+        // Consume the entry: a skipped key that lingered would make the *next* allowed call to the same
+        // tool look like a lie the runtime never told.
+        if (skipped.delete(callKeyOf(context, attempts))) counters.skipped += 1
+        return undefined
+      },
+      onEvent: () => {
+        counters.events += 1
+        return undefined
+      },
+    },
+    summary: () => ({
+      beforeRun: counters.beforeRun,
+      afterRun: counters.afterRun,
+      beforeTool: counters.beforeTool,
+      afterTool: counters.afterTool,
+      events: counters.events,
+      afterToolOnSkipped: counters.skipped,
+    }),
+  }
+}

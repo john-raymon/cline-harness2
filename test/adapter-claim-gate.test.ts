@@ -6,6 +6,7 @@ import path from "node:path"
 
 import {
   HOOKS_CLAIM_ID,
+  PLUGIN_CLAIM_ID,
   SKILLS_CLAIM_ID,
   assertClaimsSatisfied,
   requiredClaimsFor,
@@ -84,25 +85,29 @@ describe("claim gate — the cheap paths", () => {
 })
 
 describe("required claims derived from the tree", () => {
-  it("always requires the hook claim, because every session installs a gate", () => {
+  it("always requires the hook and plugin claims, because every session installs both", () => {
     assert.deepEqual(
       requiredClaimsFor({
         "EXPERIENCE.md": "# lessons\n",
         ".clinerules/project-rules.md": "rules\n",
       }),
-      [HOOKS_CLAIM_ID],
+      [HOOKS_CLAIM_ID, PLUGIN_CLAIM_ID],
     )
   })
 
   it("requires B1.skills as soon as the tree ships a skill", () => {
     assert.deepEqual(requiredClaimsFor({ ".cline/skills/pdf/SKILL.md": "# pdf\n" }), [
       HOOKS_CLAIM_ID,
+      PLUGIN_CLAIM_ID,
       SKILLS_CLAIM_ID,
     ])
   })
 
   it("does not treat a lookalike prefix as a skill", () => {
-    assert.deepEqual(requiredClaimsFor({ ".cline/skills-notes.md": "not a skill\n" }), [HOOKS_CLAIM_ID])
+    assert.deepEqual(requiredClaimsFor({ ".cline/skills-notes.md": "not a skill\n" }), [
+      HOOKS_CLAIM_ID,
+      PLUGIN_CLAIM_ID,
+    ])
   })
 })
 

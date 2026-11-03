@@ -11,7 +11,7 @@ import { writeFile } from "node:fs/promises"
 
 export const FIXTURE_SDK_VERSION = "0.2.0"
 
-export const DEFAULT_FIXTURE_CLAIMS = ["B1.skills", "B5.hooks"] as const
+export const DEFAULT_FIXTURE_CLAIMS = ["B1.skills", "B2.plugin", "B5.hooks"] as const
 
 export function evidenceReport(
   sdkVersion: string,

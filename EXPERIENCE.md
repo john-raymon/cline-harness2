@@ -33,5 +33,8 @@ Lessons from traps that actually cost time. One line each: trap → rule.
 - **A fence a body can forge is not a boundary:** `<<<path>>>` delimiters stop neighbouring files running together, but a body containing a fence-shaped line can close its own block and impersonate the next file -> refuse `^<<<` at line start in `renderBlock`.
 - **A zero-character slice still needs its bytes in the digest:** the `skills` slice renders no text, so hashing only its entry paths made a `SKILL.md` body edit invisible to `compiledPromptHash` -> keep the definition body in the slice entries; list companions by path and let `Skill.sha256` cover them.
 - **Summing a declared inventory and a built-in double-counts it:** a tree that ships `tools/skills.md` *and* a mounted skill was charged two entries for one tool -> count the union of names, not `tools.length + 1`.
+- **`afterTool` fires for refused calls:** a phase counter reads as proof of execution and is not -> count `afterToolOnSkipped` separately, pair calls by id (`toolCall.id`/`callId`/`toolCallId`), and consume the skip on first use.
+- **Importing an SDK module is a side effect:** `createTool` pulled from `@cline/sdk` at module scope initialises SDK state during pre-flight -> inject the factory and build the plugin after the loader runs but before `createCore`.
+
 
 

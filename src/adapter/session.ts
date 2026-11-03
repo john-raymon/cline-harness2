@@ -1,8 +1,17 @@
 import { z } from "zod"
 
 import { API_KEY_ENV_CHAIN, type ApiKeySource } from "../config.ts"
+import { canonicalSha256 } from "../domain/canonical.ts"
 import { sha256HexSchema, type HarnessTree, type RunConfig } from "../domain/schemas.ts"
-import { policyHooks } from "../policy/hooks.ts"
+import { recordingHooks } from "../policy/hooks.ts"
+import {
+  buildContractPlugin,
+  CONTRACT_PLUGIN_NAME,
+  CONTRACT_RULE_ID,
+  CONTRACT_RULE_TEXT,
+  CONTRACT_TOOL_NAME,
+  validateContractPlugin,
+} from "../plugin/contract.ts"
 import { buildToolInventory } from "../policy/inventory.ts"
 import {
   allowedToolNames,
@@ -62,6 +71,8 @@ export const API_KEY_SOURCES = [
 /** The slice of `@cline/sdk` this module calls, declared locally rather than imported. */
 export interface SdkSlice {
   readonly ClineCore: { create(options?: Record<string, unknown>): Promise<unknown> }
+  /** `createTool` when the SDK exposes it; the contract plugin uses it instead of importing the SDK. */
+  readonly createTool?: (definition: unknown) => unknown
 }
 export type SdkLoader = () => Promise<SdkSlice>
 
@@ -131,7 +142,7 @@ export interface SessionBootstrapInput {
  * hashes means a record cannot be hand-written into looking valid.
  */
 export const sessionBootstrapRecordSchema = z.strictObject({
-  version: z.literal(3),
+  version: z.literal(4),
   runId: z.string().min(1),
   runDir: z.string().min(1),
   harnessDir: z.string().min(1),
@@ -155,6 +166,28 @@ export const sessionBootstrapRecordSchema = z.strictObject({
   compiledPromptHash: sha256HexSchema,
   probeFingerprintSha256: sha256HexSchema,
   declaredToolEntries: z.int().nonnegative(),
+  /**
+   * Version 4 exists for these two fields.
+   *
+   * `contractPlugin` records what the injected plugin actually registered, and `hookEvidence` records which
+   * hook phases fired. Without them a record could claim a guard it never installed — `B2.plugin` showed
+   * the SDK accepts an over-claiming manifest silently, and `B5.hooks` showed `afterTool` fires even for a
+   * refused call, so a phase counter is never evidence that a tool ran.
+   */
+  contractPlugin: z.strictObject({
+    name: z.string().min(1),
+    tools: z.array(z.string().min(1)),
+    rules: z.array(z.string().min(1)),
+    ruleSha256: sha256HexSchema,
+  }),
+  hookEvidence: z.strictObject({
+    beforeRun: z.int().nonnegative(),
+    afterRun: z.int().nonnegative(),
+    beforeTool: z.int().nonnegative(),
+    afterTool: z.int().nonnegative(),
+    events: z.int().nonnegative(),
+    afterToolOnSkipped: z.int().nonnegative(),
+  }),
   /**
    * The policy the session actually ran under, and the inventory it was checked against.
    *
@@ -233,19 +266,23 @@ export async function bootstrapSession(
   })
 
   const inventory = buildToolInventory(tree)
-  // A mounted skill is only usable if the policy can name the built-in tool that loads it.
+  // A mounted skill and the contract tool are only nameable if the policy knows they exist: one comes
+  // from a directory, the other from the plugin this session installs.
   const skills = collectSkills(tree)
   const policy =
     input.toolPolicy === undefined
       ? undefined
       : parseToolPolicy(input.toolPolicy, inventory, {
-          knownTools: skills.skills.length > 0 ? [SKILLS_TOOL_NAME] : [],
+          knownTools: [SKILLS_TOOL_NAME, CONTRACT_TOOL_NAME],
         })
   const toolPolicySet = toolPolicySetOf(policy)
 
   // Declared entries, checked before anything is created: every tool entry is always-on context the
-  // model pays for on every request, and a skill costs exactly one of them however many exist.
-  const toolEntries = assertToolEntryBudget(declaredToolEntries(inventory, skills))
+  // model pays for on every request. A skill and the contract tool each cost exactly one, and the count
+  // is a union so a tree that already declares one is not charged twice.
+  const toolEntries = assertToolEntryBudget(
+    declaredToolEntries(inventory, skills, [CONTRACT_TOOL_NAME]),
+  )
 
   // Compiled from the mounted tree, never accepted from the caller, so the prompt, the inventory, the
   // policy and the fingerprint all describe the same harness by construction.
@@ -266,7 +303,7 @@ export async function bootstrapSession(
     config: input.config,
   })
   const toolDecisions: ToolDecision[] = []
-  const hooks = policyHooks({
+  const hooks = recordingHooks({
     policy,
     onDecision: (decision) => {
       if (toolDecisions.length < MAX_TOOL_DECISIONS) toolDecisions.push(decision)
@@ -304,6 +341,24 @@ export async function bootstrapSession(
       { cause: error },
     )
   })
+  // Built and validated before the runtime exists. `createTool` is the only thing the plugin needs from the
+  // SDK, and a plugin that over-claims must fail *before* a core is created — after, the failure would leave
+  // an undisposed runtime behind. `B2.plugin` recorded that the SDK accepts an over-claiming manifest
+  // silently, so this validation-only load is the only place the over-claim is ever visible.
+  const contractPlugin = buildContractPlugin(
+    sdk.createTool === undefined ? {} : { createTool: sdk.createTool },
+  )
+  let contractRegistration: { tools: string[]; rules: string[] }
+  try {
+    contractRegistration = validateContractPlugin(contractPlugin)
+  } catch (error) {
+    throw new AdapterError(
+      "HARNESS_PLUGIN_FAILED",
+      `the contract plugin could not be installed: ${describe(error)}`,
+      { cause: error },
+    )
+  }
+
   const core = await createCore(sdk, runId)
 
   const eventTypes: string[] = []
@@ -339,7 +394,8 @@ export async function bootstrapSession(
           prompt,
           config: input.config,
           maxIterations: input.maxIterations ?? DEFAULT_MAX_ITERATIONS,
-          hooks,
+          hooks: hooks.hooks,
+          extensions: [contractPlugin],
         }),
       },
       timeoutMs,
@@ -351,7 +407,7 @@ export async function bootstrapSession(
     const durationMs = Math.max(0, Math.round(now().getTime() - startedAt.getTime()))
 
     const record = {
-      version: 3,
+      version: 4,
       runId,
       runDir: prepared.runDir,
       harnessDir: prepared.harnessDir,
@@ -366,6 +422,13 @@ export async function bootstrapSession(
       compiledPromptHash: prompt.compiledPromptHash,
       probeFingerprintSha256: probeFingerprintSha256(fingerprint),
       declaredToolEntries: toolEntries,
+      contractPlugin: {
+        name: CONTRACT_PLUGIN_NAME,
+        tools: contractRegistration.tools,
+        rules: contractRegistration.rules,
+        ruleSha256: canonicalSha256(CONTRACT_RULE_TEXT),
+      },
+      hookEvidence: hooks.summary(),
       toolPolicySet,
       toolInventoryHash: inventory.hash,
       toolDecisions,
@@ -510,6 +573,7 @@ function sessionConfig(input: {
   config: RunConfig
   maxIterations: number
   hooks: unknown
+  extensions: readonly unknown[]
 }): Record<string, unknown> {
   return {
     sessionId: input.runId,
@@ -520,6 +584,8 @@ function sessionConfig(input: {
     baseUrl: input.config.baseUrl,
     apiKey: input.apiKey,
     systemPrompt: input.prompt.systemPrompt,
+    // `B2.plugin`: `pluginPaths` registered nothing, an object passed here registers its tool and rule.
+    extensions: input.extensions,
     // Sent rather than assumed: the fingerprint records these values, so a value the provider default
     // silently overrode would make the record claim a setting the run never used.
     reasoningEffort: DEFAULT_REASONING_EFFORT,

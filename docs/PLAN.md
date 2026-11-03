@@ -16,7 +16,7 @@ end of every chunk so scope survives a context reset.
 | 7 | impl ✓ | Tool policy + inventory (c2) | tool descriptions as tree files, allow/deny policy set, `toolInventoryHash` | policy actually gates a call |
 | 8 | impl ✓ | Prompt compiler (c0/c1) | assemble tree files into the compiled prompt; `compiledPromptHash` | hash changes iff the tree changes |
 | 9 | impl ✓ | Skills mount (c6) | `<cwd>/.cline/skills/<name>/SKILL.md` visibility and its tool-entry budget | costs a tool entry, not file bytes |
-| 10 | draft | Plugin + hooks (c8) | guard plugin via `extensions: [obj]`, hooks that record evidence | hook fires and effect is observable |
+| 10 | impl ✓ | Plugin + hooks (c8) | guard plugin via `extensions: [obj]`, hooks that record evidence | hook fires and effect is observable |
 | 11 | draft | Subagent orchestration | child `ClineCore` on the same cwd, excluded from the 4k/3k ledger, contract hooks installed | child budget never counted |
 | 12 | draft | T4 detector | measure context, apply `tail < target < b1 < b2`, decide stub vs summarise | thresholds trigger at the right counts |
 | 13 | draft | T4 compaction executor | summarise to target, preserve the verbatim tail, `overflow_recovery` residual logged | target met, tail intact |

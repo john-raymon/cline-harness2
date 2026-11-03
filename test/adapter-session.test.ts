@@ -280,6 +280,7 @@ describe("pre-flight", () => {
         sdkVersion: "0.2.0",
         claims: [
           { id: "B1.skills", status: "verified" },
+          { id: "B2.plugin", status: "verified" },
           { id: "B5.hooks", status: "verified" },
         ],
       }),
@@ -745,7 +746,8 @@ describe("the probe fingerprint", () => {
       compiled.slices.map((slice) => slice.id),
       ["core", "rules", "memory", "instructions"],
     )
-    assert.equal(record.declaredToolEntries, 0)
+    assert.equal(record.declaredToolEntries, 1)
+    assert.deepEqual(record.contractPlugin.tools, ["harness_contract"])
   })
 
   it("records the digest of the fingerprint it composed", async () => {
@@ -775,7 +777,7 @@ describe("the probe fingerprint", () => {
       baseline: harnessBaseline(tree),
       deps: { loadSdk: fakeSdk().loadSdk },
     })
-    assert.equal(record.declaredToolEntries, 1)
+    assert.equal(record.declaredToolEntries, 2)
   })
 
   it("refuses a tree the baseline fingerprint does not pin, before creating a run directory", async () => {

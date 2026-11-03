@@ -123,8 +123,10 @@ export function collectSkills(tree: HarnessTree): SkillInventory {
 export function declaredToolEntries(
   inventory: { readonly tools: readonly { readonly name: string }[] },
   skills: SkillInventory,
+  builtins: readonly string[] = [],
 ): number {
   const names = new Set(inventory.tools.map((tool) => tool.name))
+  for (const name of builtins) names.add(name)
   if (skills.skills.length > 0) names.add(SKILLS_TOOL_NAME)
   return names.size
 }

@@ -58,6 +58,7 @@ try {
       sdkVersion,
       claims: [
         { id: "B1.skills", status: "verified" },
+        { id: "B2.plugin", status: "verified" },
         { id: "B5.hooks", status: "verified" },
       ],
     }),
