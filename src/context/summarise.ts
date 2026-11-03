@@ -108,7 +108,16 @@ function stringify(value: unknown): string {
  * Slicing bytes would split a multi-byte character and put a replacement character in the summary; walking
  * code points keeps the text valid while staying inside the estimate.
  */
-function clipToTokens(text: string, budgetTokens: number, estimator: TokenEstimator): string {
+/**
+ * Truncate to a token budget on a code-point boundary.
+ *
+ * Slicing bytes would split a multi-byte character and put a replacement character in the summary; walking
+ * code points keeps the text valid while staying inside the estimate.
+ *
+ * Exported because the oracle summariser in `src/oracle/summariser.ts` must hold the same budget: a model
+ * that answers at 3× the allowance would otherwise turn a real compaction into `TARGET_NOT_MET`.
+ */
+export function clipToTokens(text: string, budgetTokens: number, estimator: TokenEstimator): string {
   if (estimator.estimateText(text) <= budgetTokens) return text
   let chars = 0
   let cost = 0

@@ -710,3 +710,58 @@ not as an async-capable one, and this compactor is `async` because a summariser 
 separate decision that needs its own evidence. `B4.compaction` remains unverified, so this module never calls
 the SDK's `compact` and claims no ownership of overflow recovery — the residual record says the run was over
 budget, not that the overflow path was exercised.
+
+## Oracle clients (Chunk 14)
+
+Two providers, four roles: `gemini` answers through `gemini-api`, `astra` through `codex exec`. Neither
+client talks HTTP. Both CLIs already hold a working account on this machine, so shelling out means a run
+uses the operator's own authentication instead of a second copy of a key that has to be rotated, and it
+means "which account answered" cannot drift from "which account the operator checked".
+
+1. **The transport is the seam.** `OracleTransport.send({prompt, modelId, timeoutMs})` is the only thing
+   that leaves the process, and it is injected. The default suite replaces it with a scripted runner and
+   still exercises every line above it — role contracts, argv, digests, parsing, error mapping — so
+   `pnpm test` needs no network, no credential and no subprocess. The live check swaps one function.
+2. **Raw context is the gate, and it is structural.** A call with no context is `RAW_CONTEXT_MISSING`
+   before anything is sent; every entry is path-validated, duplicate-checked and hashed, and a body with
+   a `<<<` line at line start is refused the same way the prompt compiler refuses one. The reply carries
+   `contextSha256` (the inputs as supplied) and `promptSha256` (the exact bytes handed over), so a later
+   reader can attribute an answer to its inputs without trusting the answer's own account.
+3. **Prompts travel through stdin, never argv.** A rendered harness is megabytes and argv has `ARG_MAX`;
+   `gemini-api --stdin` and `codex exec -` both read to EOF, and `spawn` (not `exec`) is what lets the
+   pipe be the channel. The prompt is assembled in one place, ordered contract → question → fenced raw
+   blocks, so nothing after the context can be mistaken for an instruction.
+4. **The four roles are four call surfaces.** `Improver.propose`, `Composer.compose`, `Selector.select`,
+   `Reflector.reflect` each fix their own role, so a call site cannot ask the Selector to rewrite a harness
+   or the Reflector to pick a winner. Each carries an instruction and a reply contract from one table
+   (`ORACLE_ROLE_SPECS`), and the contract id travels inside the prompt so a recorded call names the text
+   that asked for it.
+5. **A failed call is reported, not swallowed and not thrown past the caller.** `REPLY_EMPTY` is distinct
+   from `TRANSPORT_FAILED`: "the CLI answered with no text" and "the CLI never answered" are different
+   facts, and only one of them is a retry candidate. The Chunk 13 bridge (`oracleSummariser`) converts a
+   call failure into an empty summary so `compactContext` can refuse with a typed reason and a residual
+   instead of throwing where its contract promises refusals; `onCallFailure` is where the attempt gets
+   recorded.
+6. **Model ids participate in config, not in the fingerprint.** `geminiModelId`/`astraModelId` are
+   `CONFIG_KEYS` entries alongside the solver's, so they get provenance and `--help` for free, and the
+   oracle keys join `collectSecrets` so a leaked one is redacted. Astra's chain holds `ASTRA_API_KEY`
+   and nothing else: reading the solver's `OPENAI_API_KEY` there would hand that key to `codex` and
+   silently replace the CLI's own sign-in, so an oracle credential is opted into by naming it. They are
+   *optional* in `RunConfig` (fixtures should not have to enumerate them) and always populated by
+   `loadConfig`. `probeFingerprint` is unchanged: an oracle that proposes an edit is not part of the
+   configuration a probe runs under, and moving that hash would invalidate every recorded baseline
+   before Chunk 15 decides what arbitration records.
+
+**Verification.** The default suite proves the wiring with a scripted runner. The live gate
+(`pnpm oracle:live`, i.e. `HARNESS2_LIVE_ORACLE=on`) makes one real call per role per provider, plants a
+nonce in the raw context, and requires the answer to contain it — "a call happened" is not evidence that
+the oracle read anything.
+
+**What is not done.** Nothing here arbitrates: two answers to one question are two answers, and Chunk 15
+owns what to do when they disagree. No retry, no backoff and no per-provider quota: a transport failure
+surfaces once and the caller decides. `codex exec` is invoked read-only and ephemeral but is still an
+agent with a shell in the workspace — the sandbox is what keeps it from writing, not this module. Nothing
+records a call in the ledger yet: `attempt.recorded` has no oracle-substitution reason until arbitration
+exists. And `usage` is only present when a CLI reports it — `gemini-api --output-format json` does,
+`codex exec -o` does not — so cost accounting must treat a missing figure as unknown, not zero.
+

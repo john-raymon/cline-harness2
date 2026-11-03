@@ -21,6 +21,15 @@ export const DEFAULT_T4 = {
 export const DEFAULT_ARBITRATION = "off" as const
 
 /**
+ * Real oracle calls are opt-in.
+ *
+ * `pnpm test` must stay hermetic: the default suite drives the four role interfaces through an
+ * injected runner, so a checkout with no credentials and no network still proves the wiring. `on`
+ * is for the one live run that proves each role actually reaches a model.
+ */
+export const DEFAULT_ORACLE_LIVE = "off" as const
+
+/**
  * The provider the operator names, and the SDK provider id it means.
  *
  * The SDK has no `openai` id — it has `openai-native` (its own client) and `openai-compatible`
@@ -59,6 +68,34 @@ export const API_KEY_ENV_CHAIN = [
   "OPENAI_API_KEY",
 ] as const
 
+/**
+ * Oracle credentials, one chain per provider.
+ *
+ * The oracle clients are local CLIs (`gemini-api`, `codex`) that authenticate themselves from a
+ * keyring or an OAuth session, so no key is required here. When one *is* supplied it is forwarded to
+ * the child, and its variable name is recorded as provenance — the same discipline the solver key
+ * gets, so a run can say which input a credential came from without the credential ever being stored.
+ *
+ * Astra's chain is its own name only. `OPENAI_API_KEY` belongs to the solver chain, and reading it
+ * here would hand that key to `codex` and replace the CLI's own sign-in with an account the operator
+ * may never have meant for the oracle. An oracle credential is opted into by naming it.
+ */
+export const GEMINI_API_KEY_ENV_CHAIN = ["GEMINI_API_KEY", "GOOGLE_API_KEY"] as const
+export const ASTRA_API_KEY_ENV_CHAIN = ["ASTRA_API_KEY"] as const
+
+/** The two oracles the harness arbitrates between. */
+export const ORACLE_PROVIDERS = ["gemini", "astra"] as const
+export type OracleProvider = (typeof ORACLE_PROVIDERS)[number]
+
+/**
+ * Oracle model defaults.
+ *
+ * Named here rather than inside the oracle module so `loadConfig` and the clients cannot disagree
+ * about which model a missing value means.
+ */
+export const DEFAULT_GEMINI_MODEL_ID = "gemini-4-argon"
+export const DEFAULT_ASTRA_MODEL_ID = "gpt-6-astra"
+
 export interface ConfigKeySpec {
   readonly key: keyof RawConfig
   /** A single variable, or a fallback chain tried in order. */
@@ -82,6 +119,11 @@ export const CONFIG_KEYS: readonly ConfigKeySpec[] = [
   { key: "modelId", env: "SOLVER_MODEL", flag: "model", kind: "string", summary: "solver model id" },
   { key: "baseUrl", env: "SOLVER_BASE_URL", flag: "base-url", kind: "string", summary: "solver endpoint (https, or http for loopback)" },
   { key: "apiKey", env: API_KEY_ENV_CHAIN, flag: "api-key", kind: "string", summary: "solver API key (never persisted)" },
+  { key: "geminiModelId", env: "ORACLE_GEMINI_MODEL", flag: "gemini-model", kind: "string", summary: "gemini oracle model id" },
+  { key: "astraModelId", env: "ORACLE_ASTRA_MODEL", flag: "astra-model", kind: "string", summary: "astra oracle model id" },
+  { key: "geminiApiKey", env: GEMINI_API_KEY_ENV_CHAIN, flag: "gemini-api-key", kind: "string", summary: "gemini oracle key (never persisted)" },
+  { key: "astraApiKey", env: ASTRA_API_KEY_ENV_CHAIN, flag: "astra-api-key", kind: "string", summary: "astra oracle key (never persisted)" },
+  { key: "oracleLive", env: "HARNESS2_LIVE_ORACLE", flag: "oracle-live", kind: "string", choices: ["off", "on"], summary: "allow real oracle calls in the test suite" },
   { key: "root", env: "HARNESS2_ROOT", flag: "root", kind: "string", summary: "run root directory" },
 ]
 
@@ -97,6 +139,11 @@ export interface RawConfig {
   modelId: string
   baseUrl: string
   apiKey: string | undefined
+  geminiModelId: string
+  astraModelId: string
+  geminiApiKey: string | undefined
+  astraApiKey: string | undefined
+  oracleLive: string
   root: string
 }
 
@@ -109,6 +156,16 @@ export type ConfigSource = "cli" | "env" | "default"
  * that the check ran and found nothing, instead of looking like a dropped column.
  */
 export type ApiKeySource = "--api-key" | (typeof API_KEY_ENV_CHAIN)[number] | "absent"
+
+/** The same provenance rule for each oracle, kept in its own type so the chains cannot be mixed up. */
+export type GeminiApiKeySource =
+  | "--gemini-api-key"
+  | (typeof GEMINI_API_KEY_ENV_CHAIN)[number]
+  | "absent"
+export type AstraApiKeySource =
+  | "--astra-api-key"
+  | (typeof ASTRA_API_KEY_ENV_CHAIN)[number]
+  | "absent"
 
 export class ConfigError extends Error {
   override readonly name = "ConfigError"
@@ -135,6 +192,9 @@ export interface LoadConfigResult {
   readonly sources: Readonly<Partial<Record<keyof RawConfig, ConfigSource>>>
   /** Which input supplied the API key: a flag or env name, or `"absent"`. Never the value. */
   readonly apiKeySource: ApiKeySource
+  /** Provenance for the oracle keys, on the same terms: a name, or `"absent"`. */
+  readonly geminiApiKeySource: GeminiApiKeySource
+  readonly astraApiKeySource: AstraApiKeySource
 }
 
 /**
@@ -197,7 +257,19 @@ export function loadConfig(input: LoadConfigInput): LoadConfigResult {
     config: parsed.data,
     warnings: buildWarnings(cli, env),
     sources,
-    apiKeySource: resolveApiKeySource(cli, env),
+    apiKeySource: resolveApiKeySource("api-key", cli.apiKey, env, API_KEY_ENV_CHAIN) as ApiKeySource,
+    geminiApiKeySource: resolveApiKeySource(
+      "gemini-api-key",
+      cli.geminiApiKey,
+      env,
+      GEMINI_API_KEY_ENV_CHAIN,
+    ) as GeminiApiKeySource,
+    astraApiKeySource: resolveApiKeySource(
+      "astra-api-key",
+      cli.astraApiKey,
+      env,
+      ASTRA_API_KEY_ENV_CHAIN,
+    ) as AstraApiKeySource,
   }
 }
 
@@ -271,29 +343,57 @@ function resolveProvider(
  * Warnings worth interrupting for.
  *
  * The T4 thresholds are approved, so defaulting them is not noteworthy. Two disagreeing API keys
- * are: the wrong account silently answers every request and the run still looks healthy.
+ * are: the wrong account silently answers every request and the run still looks healthy. The oracle
+ * chains get the same treatment, plus one warning the solver does not need: `OPENAI_API_KEY` belongs
+ * to the solver *and* to the astra chain, and forwarding it to `codex` replaces that CLI's own
+ * sign-in with a key the operator may never have meant for it.
  */
 function buildWarnings(
   cli: Readonly<Partial<Record<keyof RawConfig, unknown>>>,
   env: Readonly<Record<string, string | undefined>>,
 ): string[] {
-  // An explicit flag is an explicit override, so env noise below it is not this run's problem.
-  if (hasCliApiKey(cli)) return []
+  const warnings: string[] = []
 
+  // An explicit flag is an explicit override, so env noise below it is not this run's problem.
+  if (!hasCliApiKey(cli)) {
+    const disagreement = disagreeingKeys(API_KEY_ENV_CHAIN, env)
+    if (disagreement !== undefined) {
+      warnings.push(
+        `multiple API key environment variables are set and disagree (${disagreement.join(", ")}); ` +
+          `${disagreement[0]} wins — unset the others so a run cannot silently use the wrong account`,
+      )
+    }
+  }
+
+  for (const [label, chain] of [
+    ["gemini", GEMINI_API_KEY_ENV_CHAIN],
+    ["astra", ASTRA_API_KEY_ENV_CHAIN],
+  ] as const) {
+    const disagreement = disagreeingKeys(chain, env)
+    if (disagreement !== undefined) {
+      warnings.push(
+        `multiple ${label} oracle key environment variables are set and disagree ` +
+          `(${disagreement.join(", ")}); ${disagreement[0]} wins`,
+      )
+    }
+  }
+
+  return warnings
+}
+
+/** The names in a chain that are set and non-blank, in precedence order; undefined when they agree. */
+function disagreeingKeys(
+  chain: readonly string[],
+  env: Readonly<Record<string, string | undefined>>,
+): string[] | undefined {
   const present: { name: string; value: string }[] = []
-  for (const name of API_KEY_ENV_CHAIN) {
+  for (const name of chain) {
     const value = env[name]
     if (typeof value === "string" && value.trim().length > 0) present.push({ name, value })
   }
-  if (present.length < 2) return []
-  if (new Set(present.map((entry) => entry.value.trim())).size < 2) return []
-
-  const winner = present[0]?.name ?? API_KEY_ENV_CHAIN[0]
-  return [
-    `multiple API key environment variables are set and disagree (${present
-      .map((entry) => entry.name)
-      .join(", ")}); ${winner} wins — unset the others so a run cannot silently use the wrong account`,
-  ]
+  if (present.length < 2) return undefined
+  if (new Set(present.map((entry) => entry.value.trim())).size < 2) return undefined
+  return present.map((entry) => entry.name)
 }
 
 function hasCliApiKey(cli: Readonly<Partial<Record<keyof RawConfig, unknown>>>): boolean {
@@ -302,11 +402,13 @@ function hasCliApiKey(cli: Readonly<Partial<Record<keyof RawConfig, unknown>>>):
 }
 
 function resolveApiKeySource(
-  cli: Readonly<Partial<Record<keyof RawConfig, unknown>>>,
+  flag: string,
+  fromCli: unknown,
   env: Readonly<Record<string, string | undefined>>,
-): ApiKeySource {
-  if (hasCliApiKey(cli)) return "--api-key"
-  for (const name of API_KEY_ENV_CHAIN) {
+  chain: readonly string[],
+): string {
+  if (typeof fromCli === "string" && fromCli.length > 0) return `--${flag}`
+  for (const name of chain) {
     const value = env[name]
     if (value !== undefined && value.trim() !== "") return name
   }
@@ -335,6 +437,12 @@ function defaultFor(key: keyof RawConfig, cwd: string): unknown {
       return DEFAULT_MODEL_ID
     case "baseUrl":
       return DEFAULT_BASE_URL
+    case "geminiModelId":
+      return DEFAULT_GEMINI_MODEL_ID
+    case "astraModelId":
+      return DEFAULT_ASTRA_MODEL_ID
+    case "oracleLive":
+      return DEFAULT_ORACLE_LIVE
     case "root":
       return cwd
     default:
@@ -399,6 +507,12 @@ function collectSecrets(
     cli.apiKey,
     ...API_KEY_ENV_CHAIN.map((name) => env[name]),
     env["HARNESS2_API_KEY"],
+    // Oracle credentials are secrets on exactly the same terms: a message that mentions one must not
+    // print it, whether or not the value went on to be used.
+    cli.geminiApiKey,
+    cli.astraApiKey,
+    ...GEMINI_API_KEY_ENV_CHAIN.map((name) => env[name]),
+    ...ASTRA_API_KEY_ENV_CHAIN.map((name) => env[name]),
   ]
   const variants = new Set<string>()
   for (const value of candidates) {

@@ -5,6 +5,7 @@
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",
     "test": "node --import tsx --test test/*.test.ts",
+    "oracle:live": "HARNESS2_LIVE_ORACLE=on node --import tsx --test test/oracle-live.test.ts",
     "spike:sdk": "node --import tsx spikes/sdk.ts"
   },
   "keywords": [],

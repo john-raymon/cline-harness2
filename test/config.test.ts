@@ -3,10 +3,14 @@ import { describe, it } from "node:test"
 
 import {
   API_KEY_ENV_CHAIN,
+  ASTRA_API_KEY_ENV_CHAIN,
   ConfigError,
+  DEFAULT_ASTRA_MODEL_ID,
   DEFAULT_BASE_URL,
+  DEFAULT_GEMINI_MODEL_ID,
   DEFAULT_MODEL_ID,
   DEFAULT_T4,
+  GEMINI_API_KEY_ENV_CHAIN,
   KIMI_K3_MODEL_ID,
   RETIRED_ENV,
   loadConfig,
@@ -430,5 +434,99 @@ describe("retired environment variables", () => {
       loadConfig({ cwd: CWD, env: { HARNESS2_MODEL: "   " } }).config.modelId,
       DEFAULT_MODEL_ID,
     )
+  })
+})
+
+describe("oracle configuration (chunk 14)", () => {
+  it("defaults both models and keeps real calls off", () => {
+    const { config, sources, geminiApiKeySource, astraApiKeySource } = loadConfig({ cwd: CWD })
+    assert.equal(config.geminiModelId, DEFAULT_GEMINI_MODEL_ID)
+    assert.equal(config.astraModelId, DEFAULT_ASTRA_MODEL_ID)
+    assert.equal(config.oracleLive, "off")
+    assert.equal(config.geminiApiKey, undefined)
+    assert.equal(config.astraApiKey, undefined)
+    assert.equal(sources.geminiModelId, "default")
+    assert.equal(geminiApiKeySource, "absent")
+    assert.equal(astraApiKeySource, "absent")
+  })
+
+  it("reads each chain in order and reports the name that won", () => {
+    const both = loadConfig({
+      cwd: CWD,
+      env: {
+        GEMINI_API_KEY: "gemini-first",
+        GOOGLE_API_KEY: "gemini-second",
+        ASTRA_API_KEY: "astra-first",
+        OPENAI_API_KEY: "astra-second",
+      },
+    })
+    assert.equal(both.config.geminiApiKey, "gemini-first")
+    assert.equal(both.geminiApiKeySource, GEMINI_API_KEY_ENV_CHAIN[0])
+    assert.equal(both.config.astraApiKey, "astra-first")
+    assert.equal(both.astraApiKeySource, ASTRA_API_KEY_ENV_CHAIN[0])
+
+    const fallback = loadConfig({ cwd: CWD, env: { GOOGLE_API_KEY: "gemini-second" } })
+    assert.equal(fallback.config.geminiApiKey, "gemini-second")
+    assert.equal(fallback.geminiApiKeySource, "GOOGLE_API_KEY")
+
+    const flag = loadConfig({
+      cwd: CWD,
+      env: { GEMINI_API_KEY: "gemini-env" },
+      cli: { geminiApiKey: "gemini-flag" },
+    })
+    assert.equal(flag.config.geminiApiKey, "gemini-flag")
+    assert.equal(flag.geminiApiKeySource, "--gemini-api-key")
+  })
+
+  it("lets the model and the live switch be overridden by env", () => {
+    const { config, sources } = loadConfig({
+      cwd: CWD,
+      env: { ORACLE_GEMINI_MODEL: "gemini-3.8-flash", ORACLE_ASTRA_MODEL: "gpt-6-astra", HARNESS2_LIVE_ORACLE: "on" },
+    })
+    assert.equal(config.geminiModelId, "gemini-3.8-flash")
+    assert.equal(config.astraModelId, "gpt-6-astra")
+    assert.equal(config.oracleLive, "on")
+    assert.equal(sources.oracleLive, "env")
+  })
+
+  it("rejects a live switch that is neither off nor on", () => {
+    assert.throws(
+      () => loadConfig({ cwd: CWD, env: { HARNESS2_LIVE_ORACLE: "yes" } }),
+      (error: unknown) =>
+        error instanceof ConfigError && error.message.includes("HARNESS2_LIVE_ORACLE"),
+    )
+  })
+
+  it("redacts an oracle key that leaked into another field", () => {
+    const leaked = "gk-live-secret-value"
+    assert.throws(
+      () => loadConfig({ cwd: CWD, env: { GEMINI_API_KEY: leaked, HARNESS2_MODE: leaked } }),
+      (error: unknown) =>
+        error instanceof ConfigError &&
+        error.message.includes("<redacted>") &&
+        !error.message.includes(leaked),
+      "an oracle key is a secret on the same terms as the solver key",
+    )
+  })
+})
+
+describe("oracle key precedence warnings (chunk 14)", () => {
+  it("never reads the solver's OPENAI_API_KEY as an oracle credential", () => {
+    const { config, astraApiKeySource, warnings } = loadConfig({
+      cwd: CWD,
+      env: { OPENAI_API_KEY: "sk-solver-only" },
+    })
+    assert.equal(config.astraApiKey, undefined, "an oracle credential is opted into by naming it")
+    assert.equal(astraApiKeySource, "absent", "codex keeps its own sign-in unless told otherwise")
+    assert.deepEqual(warnings, [])
+  })
+
+  it("warns when an oracle chain disagrees with itself", () => {
+    const { warnings } = loadConfig({
+      cwd: CWD,
+      env: { GEMINI_API_KEY: "gemini-a", GOOGLE_API_KEY: "gemini-b" },
+    })
+    assert.equal(warnings.length, 1)
+    assert.match(warnings[0] ?? "", /multiple gemini oracle key environment variables/)
   })
 })

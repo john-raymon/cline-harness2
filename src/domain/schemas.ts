@@ -402,6 +402,11 @@ export const ARBITRATION_MODES = ["off", "probe"] as const
 export const arbitrationModeSchema = z.enum(ARBITRATION_MODES)
 export type ArbitrationMode = z.infer<typeof arbitrationModeSchema>
 
+/** Whether the suite may reach a real oracle. `off` is the default, so `pnpm test` needs no network. */
+export const ORACLE_LIVE_MODES = ["off", "on"] as const
+export const oracleLiveSchema = z.enum(ORACLE_LIVE_MODES)
+export type OracleLiveMode = z.infer<typeof oracleLiveSchema>
+
 /** A model id is one opaque token: `hf:deepseek-ai/DeepSeek-V4.1-Flash-1017` is legal. */
 const modelIdSchema = z
   .string()
@@ -432,6 +437,18 @@ export const runConfigSchema = z
     baseUrl: baseUrlSchema,
     arbitration: arbitrationModeSchema,
     apiKey: z.string().min(1).optional(),
+    /**
+     * Oracle settings are optional here and always populated by `loadConfig`.
+     *
+     * Optional because a fixture about the solver should not have to enumerate two oracle models and
+     * two absence markers; populated because no caller should have to guess a default. The clients
+     * fall back to the same constants `loadConfig` resolves, so the two cannot disagree.
+     */
+    geminiModelId: modelIdSchema.optional(),
+    astraModelId: modelIdSchema.optional(),
+    geminiApiKey: z.string().min(1).optional(),
+    astraApiKey: z.string().min(1).optional(),
+    oracleLive: oracleLiveSchema.optional(),
     root: z.string().min(1),
   })
   .superRefine((config, ctx) => {
