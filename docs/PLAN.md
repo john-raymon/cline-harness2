@@ -28,6 +28,7 @@ end of every chunk so scope survives a context reset.
 | 19 | impl ✓ | Budget + stop conditions | enforce 4k executions / 3k improvements, halting rules | run stops exactly on budget |
 | 20 | impl ✓ | CLI | `src/cli.ts` + `bin`, argv parsing, exit codes, `--help` from `CONFIG_KEYS` | help text cannot drift from the table |
 | 21 | impl ✓ | End-to-end | full run against a real model, docs finalisation, verification script | one honest end-to-end result |
+| 22 | impl ✓ | Editor bridge | environment-only selection gate, candidate selection in the loop, write-back, MCP stdio server | usable from the Cline VS Code extension |
 
 ## Standing rules for every chunk
 

@@ -8,10 +8,12 @@
     "cli": "node bin/harness2.mjs",
     "oracle:live": "HARNESS2_LIVE_ORACLE=on node --import tsx --test test/oracle-live.test.ts",
     "spike:sdk": "node --import tsx spikes/sdk.ts",
-    "verify:e2e": "node --import tsx scripts/verify-e2e.ts"
+    "verify:e2e": "node --import tsx scripts/verify-e2e.ts",
+    "mcp": "node bin/harness2-mcp.mjs"
   },
   "bin": {
-    "harness2": "bin/harness2.mjs"
+    "harness2": "bin/harness2.mjs",
+    "harness2-mcp": "bin/harness2-mcp.mjs"
   },
   "keywords": [],
   "author": "",

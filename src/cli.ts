@@ -23,6 +23,8 @@ export interface CliRunInput {
   readonly task: string
   /** Which input supplied the solver key: a flag name, an env name, or `"absent"`. Never the key. */
   readonly apiKeySource: string
+  /** Write the improved harness back into the repository when the run ends. */
+  readonly writeBack: boolean
 }
 
 export interface CliRunOutcome {
@@ -101,6 +103,7 @@ export async function main(
       repo: parsed.repo,
       task: parsed.task ?? "",
       apiKeySource: loaded.apiKeySource,
+      writeBack: parsed.writeBack,
     })
     if (result.detail !== undefined) io.out(`${result.outcome}: ${result.detail}`)
     return EXIT_CODES[result.outcome === "completed" ? "ok" : result.outcome === "halted" ? "halted" : "failed"]
@@ -117,10 +120,14 @@ function executeWithRunHarness(input: CliRunInput, io: CliIo): Promise<CliRunOut
     repo: input.repo,
     task: input.task,
     apiKeySource: input.apiKeySource,
+    writeBack: input.writeBack,
     report: (line) => io.err(`harness2: ${line}`),
   }).then((result) => ({
     outcome: result.outcome,
-    detail: `${result.detail} (run ${result.runId}, ${result.executions} executions, ${result.improvements} improvements)`,
+    detail:
+      `${result.detail} (run ${result.runId}, ${result.executions} executions, ` +
+      `${result.improvements} improvements, ${result.acceptedImprovements} accepted, ` +
+      `${result.writeBack?.written.length ?? 0} file(s) written back)`,
   }))
 }
 

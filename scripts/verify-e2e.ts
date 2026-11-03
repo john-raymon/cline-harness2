@@ -67,10 +67,16 @@ function proposal(file: string, rule: string): string {
 }
 
 function scriptedOracles(target: string): OracleClients {
+  // Call order: improver after each execution, and the Selector comparing the harness it produced against the
+  // one it replaced on the next execution. The selector keeps each improvement (`CHOICE: exec-<n>`), so the
+  // run is expected to complete on budget with every edit retained.
   const script = scripted([
     geminiAnswer(proposal(target, "cite the file a rule applies to")),
+    geminiAnswer("CHOICE: exec-2"),
     geminiAnswer(proposal(target, "keep the patch small")),
+    geminiAnswer("CHOICE: exec-3"),
     geminiAnswer(proposal(target, "state the evidence for each rule")),
+    geminiAnswer("CHOICE: exec-4"),
   ])
   return { gemini: geminiClient(script), astra: astraClient(script) }
 }

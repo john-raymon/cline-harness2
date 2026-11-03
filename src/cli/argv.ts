@@ -12,6 +12,7 @@ import { CONFIG_KEYS, defaultFor, type RawConfig } from "../config.ts"
 export const TASK_FLAG = "task"
 export const REPO_FLAG = "repo"
 export const DRY_RUN_FLAG = "dry-run"
+export const NO_WRITE_BACK_FLAG = "no-write-back"
 
 export const USAGE = "harness2 [options] [--] <task>"
 
@@ -24,6 +25,8 @@ export interface ParsedArgv {
   readonly repo: string
   readonly help: boolean
   readonly dryRun: boolean
+  /** Default true: the run writes the harness it ended with back into `--repo`. */
+  readonly writeBack: boolean
   readonly errors: readonly string[]
 }
 
@@ -37,6 +40,7 @@ export function parseArgv(argv: readonly string[], cwd: string): ParsedArgv {
   let repo = cwd
   let help = false
   let dryRun = false
+  let writeBack = true
   let index = 0
 
   while (index < argv.length) {
@@ -54,6 +58,10 @@ export function parseArgv(argv: readonly string[], cwd: string): ParsedArgv {
     }
     if (token === `--${DRY_RUN_FLAG}`) {
       dryRun = true
+      continue
+    }
+    if (token === `--${NO_WRITE_BACK_FLAG}`) {
+      writeBack = false
       continue
     }
     if (token.startsWith("-") && !token.startsWith("--") && token !== "-") {
@@ -118,6 +126,7 @@ export function parseArgv(argv: readonly string[], cwd: string): ParsedArgv {
     repo,
     help,
     dryRun,
+    writeBack: writeBack && !dryRun,
     errors,
   }
 }
@@ -153,6 +162,7 @@ export function helpText(options: { readonly cwd?: string } = {}): string {
     "Options:",
     "  -h, --help".padEnd(width + 4) + "show this help and exit",
     `  --${DRY_RUN_FLAG}`.padEnd(width + 4) + "resolve everything, print the plan, run nothing",
+    `  --${NO_WRITE_BACK_FLAG}`.padEnd(width + 4) + "leave the repository untouched (default: write improvements back)",
     `  --${TASK_FLAG} <text>`.padEnd(width + 4) + "the task to run (or pass it as the last argument)",
     `  --${REPO_FLAG} <dir>`.padEnd(width + 4) + "workspace to work in (default: current directory)",
     "",

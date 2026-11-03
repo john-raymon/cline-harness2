@@ -1,6 +1,8 @@
 import { baselineShaOf, baselineFingerprintSchema, type BaselineFingerprint } from "../baseline/fingerprint.ts"
 import { canonicalSha256 } from "../domain/canonical.ts"
 import {
+  gitObjectIdSchema,
+  sha256HexSchema,
   PROBE_FINGERPRINT_VERSION,
   probeFingerprintSchema,
   type HarnessTree,
@@ -9,6 +11,7 @@ import {
   type RunConfig,
 } from "../domain/schemas.ts"
 import type { CompiledPrompt } from "../prompt/compile.ts"
+import { z } from "zod"
 import { FingerprintError } from "./errors.ts"
 
 /**
@@ -142,4 +145,71 @@ export function verifyHarnessBaseline(input: {
       `the baseline fingerprint hashes to ${baselineSha} but the baseline claims ${input.baselineSha}`,
     )
   }
+}
+
+/**
+ * What has to match for two probes to be comparable.
+ *
+ * A matched contrast is a claim that "the only difference between these two measurements is the harness".
+ * That claim is about the *environment*, not about the digest: `treeSha`, `compiledPromptHash` and
+ * `librarySnapshotHash` are exactly what a candidate is trying to change, and `baselineSha` is a digest
+ * *over* those fields, so requiring any of them to be equal would refuse every real candidate and leave the
+ * Selector able to compare a harness only with itself.
+ *
+ * So this is the invariant projection: same repository state, same model, same endpoint, same tool surface,
+ * same context policy. If any of these moved, the probes answer different questions and no choice between
+ * them means anything.
+ */
+export const probeEnvironmentSchema = z.strictObject({
+  baseSha: gitObjectIdSchema,
+  dependencyLockHash: sha256HexSchema,
+  ssotRulesHash: sha256HexSchema,
+  providerId: z.string().min(1),
+  modelId: z.string().min(1),
+  baseUrl: z.string().min(1),
+  reasoningEffort: z.string().min(1),
+  thinking: z.boolean(),
+  toolPolicySet: z.array(z.string().min(1)),
+  toolInventoryHash: sha256HexSchema,
+  t4Policy: z.string().min(1),
+})
+
+export type ProbeEnvironment = z.infer<typeof probeEnvironmentSchema>
+
+/** The invariant half of a fingerprint, in a stable order so two projections compare directly. */
+export function probeEnvironmentOf(fingerprint: ProbeFingerprint): ProbeEnvironment {
+  return probeEnvironmentSchema.parse({
+    baseSha: fingerprint.baseSha,
+    dependencyLockHash: fingerprint.dependencyLockHash,
+    ssotRulesHash: fingerprint.ssotRulesHash,
+    providerId: fingerprint.providerId,
+    modelId: fingerprint.modelId,
+    baseUrl: fingerprint.baseUrl,
+    reasoningEffort: fingerprint.reasoningEffort,
+    thinking: fingerprint.thinking,
+    toolPolicySet: [...new Set(fingerprint.toolPolicySet)].sort(),
+    toolInventoryHash: fingerprint.toolInventoryHash,
+    t4Policy: fingerprint.t4Policy,
+  })
+}
+
+/**
+ * Names of the invariant fields that differ, empty when the two probes are comparable.
+ *
+ * Field names rather than a boolean: a refusal that says only "they do not match" cannot be acted on, and
+ * the whole point of the gate is that the operator can see *what* moved.
+ */
+export function environmentMismatches(
+  left: ProbeEnvironment,
+  right: ProbeEnvironment,
+): readonly string[] {
+  const fields = Object.keys(probeEnvironmentSchema.shape) as (keyof ProbeEnvironment)[]
+  const differing: string[] = []
+  for (const field of fields) {
+    const a = left[field]
+    const b = right[field]
+    const same = Array.isArray(a) && Array.isArray(b) ? a.join("\n") === b.join("\n") : a === b
+    if (!same) differing.push(field)
+  }
+  return differing
 }

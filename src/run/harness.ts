@@ -1,5 +1,7 @@
 import path from "node:path"
+import { existsSync, readFileSync } from "node:fs"
 import { createRequire } from "node:module"
+import { fileURLToPath } from "node:url"
 
 import {
   bootstrapSession,
@@ -13,7 +15,14 @@ import { canonicalSha256 } from "../domain/canonical.ts"
 import { compactContext, recordOverflowRecovery } from "../context/compact.ts"
 import { detectContext, type ContextAssessment } from "../context/detector.ts"
 import type { HarnessTree, RunConfig } from "../domain/schemas.ts"
+import type { CompiledPrompt } from "../prompt/compile.ts"
 import { materialiseTree } from "../harness/tree-store.ts"
+import {
+  composeProbeFingerprint,
+  probeEnvironmentOf,
+  type ProbeEnvironment,
+} from "../fingerprint/probe.ts"
+import { selectCandidate, type Candidate } from "../improve/selector.ts"
 import {
   addLesson,
   applyLessonLibrary,
@@ -29,6 +38,7 @@ import { buildToolInventory } from "../policy/inventory.ts"
 import { compilePrompt } from "../prompt/compile.ts"
 import { createOracleClients, oracleRoles, type OracleClients } from "../oracle/client.ts"
 import { budgetOf, mayStartImprovement, stopDecision, type StopReason } from "./budget.ts"
+import { writeBackHarness, type WriteBackResult } from "./write-back.ts"
 
 /**
  * One run, end to end.
@@ -60,6 +70,14 @@ export interface RunHarnessInput {
   readonly deps?: RunHarnessDeps
   /** Progress lines for the CLI. Absent means silent. */
   readonly report?: (line: string) => void
+  /**
+   * Write the winning harness back into `repo` at the end of the run.
+   *
+   * Default true: a run whose result stays in a temp directory is a research artifact, and this harness is
+   * used from an editor. `--dry-run` and `--no-write-back` turn it off, and only files whose bytes actually
+   * moved are written.
+   */
+  readonly writeBack?: boolean
 }
 
 export interface RunHarnessDeps {
@@ -80,6 +98,25 @@ export interface RunHarnessDeps {
   readonly evidencePath?: string
 }
 
+/** What the Selector decided for one accepted improvement. */
+export interface SelectionRecord {
+  readonly improvementId: string
+  /** The probe it chose, or `null` when it refused to choose at all. */
+  readonly chosen: string | null
+  /** True when it chose the incumbent, so the accepted edit was undone. */
+  readonly reverted: boolean
+  readonly reason?: string
+}
+
+/** An accepted improvement awaiting the measurement of the harness it produced. */
+interface PendingSelection {
+  readonly improvementId: string
+  /** The harness that was measured *before* the edit, offered to the Selector as a real alternative. */
+  readonly incumbent: Candidate
+  readonly tree: HarnessTree
+  readonly baseline: HarnessBaseline
+}
+
 export interface RunHarnessResult {
   readonly runId: string
   readonly runDir: string
@@ -92,8 +129,16 @@ export interface RunHarnessResult {
   /** The subset that actually changed the harness. */
   readonly acceptedImprovements: number
   readonly lessons: number
+  /** What the Selector decided for each accepted improvement, and whether it was reverted. */
+  readonly selections: readonly SelectionRecord[]
+  /** What reached the repository, if write-back ran. */
+  readonly writeBack: WriteBackResult | undefined
   readonly ledgerPath: string
 }
+
+/** Bounded so a malformed layout cannot walk to the filesystem root. */
+const MAX_MANIFEST_HOPS = 6
+const SDK_PACKAGE = "@cline/sdk"
 
 /** A turn with no text, or one the session ended on an error reason, is not a pass. */
 export function defaultGrade(record: SessionBootstrapRecord): ExecutionOutcome {
@@ -103,14 +148,58 @@ export function defaultGrade(record: SessionBootstrapRecord): ExecutionOutcome {
   return "pass"
 }
 
-/** The `@cline/sdk` version actually installed. The claim gate compares it, so it is read, never assumed. */
-function readInstalledSdkVersion(): string {
-  const require = createRequire(import.meta.url)
-  const pkg = require("@cline/sdk/package.json") as { version?: unknown }
-  if (typeof pkg.version !== "string" || pkg.version.length === 0) {
-    throw new Error("@cline/sdk does not report a version; the claim gate cannot be evaluated")
+/**
+ * The `@cline/sdk` version actually installed. The claim gate compares it, so it is read, never assumed.
+ *
+ * `require("@cline/sdk/package.json")` fails on a package whose `exports` map does not expose the manifest,
+ * which is the normal shape for a modern ESM package. So the manifest is found by resolving the package entry
+ * and walking up to the `package.json` that names it — the only way to read a version without importing it.
+ */
+export function readInstalledSdkVersion(): string {
+  const candidates: string[] = []
+
+  // A release that exposes the manifest: cheapest correct answer.
+  try {
+    candidates.push(createRequire(import.meta.url).resolve(`${SDK_PACKAGE}/package.json`))
+  } catch {
+    // Expected for an `exports`-only ESM package.
   }
-  return pkg.version
+  // Otherwise resolve the package *directory* the way Node does, which needs no `exports` entry at all.
+  const walked = findManifestByWalk()
+  if (walked !== undefined) candidates.push(walked)
+
+  for (const manifest of candidates) {
+    let pkg: { name?: unknown; version?: unknown }
+    try {
+      pkg = JSON.parse(readFileSync(manifest, "utf8")) as { name?: unknown; version?: unknown }
+    } catch {
+      continue
+    }
+    if (pkg.name === SDK_PACKAGE && typeof pkg.version === "string" && pkg.version.length > 0) {
+      return pkg.version
+    }
+  }
+
+  throw new Error(`${SDK_PACKAGE} does not report a version; the claim gate cannot be evaluated`)
+}
+
+/**
+ * `node_modules/@cline/sdk/package.json`, found by walking up from this file.
+ *
+ * Neither `require.resolve("@cline/sdk")` nor the manifest subpath works here: the package is ESM-only with
+ * subpath exports and no `main`, so both throw. The directory is still there, and reading it directly is what
+ * Node's own resolution would have found.
+ */
+function findManifestByWalk(): string | undefined {
+  let dir = path.dirname(fileURLToPath(import.meta.url))
+  for (let hop = 0; hop < MAX_MANIFEST_HOPS; hop += 1) {
+    const candidate = path.join(dir, "node_modules", SDK_PACKAGE, "package.json")
+    if (existsSync(candidate)) return candidate
+    const parent = path.dirname(dir)
+    if (parent === dir) return undefined
+    dir = parent
+  }
+  return undefined
 }
 
 export async function runHarness(input: RunHarnessInput): Promise<RunHarnessResult> {
@@ -176,6 +265,9 @@ export async function runHarness(input: RunHarnessInput): Promise<RunHarnessResu
   let improvements = 0
   let lessons = 0
   let lastImprovementAccepted: boolean | undefined
+  /** An accepted improvement whose successor execution has not been compared with its predecessor yet. */
+  let pending: PendingSelection | undefined
+  const selections: SelectionRecord[] = []
   let outcome: RunOutcome = "completed"
   let reason: StopReason = "executions-exhausted"
   let detail = ""
@@ -252,6 +344,67 @@ export async function runHarness(input: RunHarnessInput): Promise<RunHarnessResu
       await ledger.append({ kind: "execution.finished", executionId, outcome: executionOutcome })
       say(`execution ${executionId}: ${executionOutcome}`)
 
+      // The invariant half of this probe's environment, composed from the same inputs the session used. A
+      // candidate may change `treeSha`/`compiledPromptHash` — that is the point — but not these fields.
+      const environment = environmentOf({
+        baseline,
+        compiled,
+        config,
+        toolPolicySet: record.toolPolicySet,
+        toolInventoryHash: record.toolInventoryHash,
+      })
+
+      // --- selection ---------------------------------------------------------
+      // One iteration late by design: a candidate only exists once it has been measured, so the comparison
+      // happens on the execution *after* the improvement. Choosing the incumbent reverts the edit; a
+      // refusal keeps it, because "I could not compare" is not evidence that the edit was worse.
+      if (pending !== undefined) {
+        const candidateProbe: Candidate = {
+          id: executionId,
+          fingerprintSha256: record.probeFingerprintSha256,
+          probe: record.text,
+          environment,
+        }
+        // Both probes go in as candidates: "keep the harness I had" is a legitimate choice, and it is the
+        // only way a Selector can express a revert. The incumbent also serves as the matching reference.
+        const selection = await selectCandidate({
+          selector: roles.selector,
+          baseline: pending.incumbent,
+          candidates: [pending.incumbent, candidateProbe],
+        })
+        if (selection.status === "selected") {
+          const kept = selection.candidateId === candidateProbe.id
+          if (!kept) {
+            // Restore the harness that was measured, then re-render it: the lesson library is knowledge the run
+            // gained, not part of the edit being undone, so `LongTermMEMORY.md` and the compiled prompt are
+            // rebuilt from the restored tree rather than restored from a snapshot that predates those lessons.
+            tree = applyLessonLibrary(pending.tree, library)
+            baseline = rebaseBaseline(pending.baseline, tree)
+            compiled = compilePrompt({ tree, task: input.task })
+            inventoryHash = buildToolInventory(tree).hash
+          }
+          selections.push({
+            improvementId: pending.improvementId,
+            chosen: selection.candidateId,
+            reverted: !kept,
+          })
+          say(
+            `selection ${pending.improvementId}: ${kept ? "kept" : "reverted"} (chose ${selection.candidateId})`,
+          )
+        } else {
+          selections.push({
+            improvementId: pending.improvementId,
+            chosen: null,
+            reverted: false,
+            reason: `${selection.code}: ${selection.reason}`,
+          })
+          say(
+            `selection ${pending.improvementId}: refused (${selection.code}); keeping the improvement`,
+          )
+        }
+        pending = undefined
+      }
+
       // A failure is the only thing worth reflecting on; a pass has no lesson to teach.
       const evidence = evidenceOf(executionId, record, executionOutcome).map((entry) => ({
       ...entry,
@@ -301,6 +454,19 @@ export async function runHarness(input: RunHarnessInput): Promise<RunHarnessResu
 
         const foreign = proposal.status === "proposed" ? outsideCaptured(proposal.tree, tree) : []
         if (proposal.status === "proposed" && proposal.changed.length > 0 && foreign.length === 0) {
+          // Snapshot what this improvement is about to replace: if the Selector later prefers the incumbent,
+          // reverting has to restore the exact state that was measured, not an approximation of it.
+          pending = {
+            improvementId,
+            incumbent: {
+              id: executionId,
+              fingerprintSha256: record.probeFingerprintSha256,
+              probe: record.text,
+              environment,
+            },
+            tree,
+            baseline,
+          }
           tree = applyLessonLibrary(proposal.tree, library)
           baseline = rebaseBaseline(baseline, tree)
           compiled = compilePrompt({ tree, task: input.task })
@@ -335,6 +501,28 @@ export async function runHarness(input: RunHarnessInput): Promise<RunHarnessResu
     // The library is written where a later run would read it: the run directory holds the harness the run
     // ended with, lessons included.
     await materialiseTree({ dir: path.join(runDir, "tree"), tree: applyLessonLibrary(tree, library) })
+
+    // The repository gets the harness the run ended with — but only after the run directory holds it, so an
+    // editing mistake cannot destroy the record of what produced it.
+    let writtenBack: WriteBackResult | undefined
+    if (input.writeBack === true) {
+      writtenBack = await writeBackHarness({
+        repo: input.repo,
+        captured: captured.tree,
+        final: applyLessonLibrary(tree, library),
+        ...(input.ssotRoot === undefined ? {} : { ssotRoot: input.ssotRoot }),
+      })
+      const changed = writtenBack.written.length
+      say(
+        changed === 0
+          ? `write-back: nothing changed (${writtenBack.unchanged.length} file(s) already current)`
+          : `write-back: ${changed} file(s) updated (${writtenBack.written
+              .map((file) => file.path)
+              .join(", ")})`,
+      )
+      for (const skip of writtenBack.skipped) say(`write-back: skipped ${skip.path} (${skip.reason})`)
+    }
+
     const finished = await ledger.finishRun(outcome)
     if (finished.kind !== "run.finished") {
       throw new Error(`the ledger closed the run as ${finished.kind}, not run.finished`)
@@ -354,6 +542,8 @@ export async function runHarness(input: RunHarnessInput): Promise<RunHarnessResu
       improvements: finished.improvements,
       acceptedImprovements: improvements,
       lessons,
+      selections,
+      writeBack: writtenBack,
       ledgerPath: path.join(runDir, "ledger.jsonl"),
     }
   } finally {
@@ -501,4 +691,29 @@ export function redactSecrets(text: string, secrets: readonly string[]): string 
   let out = text
   for (const secret of secrets) out = out.split(secret).join("***")
   return out
+}
+
+/**
+ * The invariant half of a probe's fingerprint.
+ *
+ * Composed with `composeProbeFingerprint` from the same inputs the session used, then projected down to the
+ * fields a candidate is not allowed to change. Using the domain function rather than reading the record's
+ * echoed fields means the harness and the session cannot disagree about what the environment was.
+ */
+function environmentOf(input: {
+  readonly baseline: HarnessBaseline
+  readonly compiled: CompiledPrompt
+  readonly config: RunConfig
+  readonly toolPolicySet: readonly string[]
+  readonly toolInventoryHash: string
+}): ProbeEnvironment {
+  return probeEnvironmentOf(
+    composeProbeFingerprint({
+      baseline: input.baseline.fingerprint,
+      prompt: input.compiled,
+      toolPolicySet: input.toolPolicySet,
+      toolInventoryHash: input.toolInventoryHash,
+      config: input.config,
+    }),
+  )
 }

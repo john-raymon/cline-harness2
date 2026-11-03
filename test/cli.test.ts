@@ -31,6 +31,12 @@ describe("parseArgv", () => {
     assert.equal(parseArgv(["--task=a b"], CWD).task, "a b")
   })
 
+  it("writes back by default, and only when asked not to", () => {
+    assert.equal(parseArgv(["do it"], CWD).writeBack, true)
+    assert.equal(parseArgv(["--no-write-back", "do it"], CWD).writeBack, false)
+    assert.equal(parseArgv(["--dry-run", "do it"], CWD).writeBack, false, "a dry run never edits a repo")
+  })
+
   it("defaults the repository to the working directory", () => {
     assert.equal(parseArgv(["do it"], CWD).repo, CWD)
     assert.equal(parseArgv(["--repo", "/tmp/other", "do it"], CWD).repo, "/tmp/other")

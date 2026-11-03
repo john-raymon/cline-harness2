@@ -1080,3 +1080,97 @@ wiring, and wiring is where a system starts claiming things no part of it can su
 Two more, found by the same pass without a code change: generated run ids carry a random suffix (a
 millisecond clock can repeat inside one process, and `run.started` refuses a second time), and a
 whitespace-only task is a usage error (`2`), not a failed run (`1`).
+
+## VS Code / Cline bridge (Chunk 22)
+
+Three changes make the harness usable from an editor instead of only from a terminal: the Selector can now
+compare a harness with the one it replaced, the run can write its result back, and there is an MCP server.
+
+### 1. The matched-environment gate (a correction to Chunk 17)
+
+`ProbeFingerprint` includes `treeSha`, `compiledPromptHash` and `librarySnapshotHash`, and `baselineSha` is a
+digest *over* those fields. Chunk 17 compared that digest, which made `selectCandidate` unable to accept any
+real candidate: a candidate exists to change the harness, and changing it moves every one of them. The gate
+now compares `ProbeEnvironment` — `baseSha`, `dependencyLockHash`, `ssotRulesHash`, `providerId`, `modelId`,
+`baseUrl`, `reasoningEffort`, `thinking`, `toolPolicySet`, `toolInventoryHash`, `t4Policy` — and lets the
+harness fields move.
+
+- Refusals name the fields that moved (`candidate-b (modelId, baseUrl differ)`), because "they do not match"
+  is not actionable.
+- A probe with no `environment` still has to match on the digest: absent evidence is not evidence of a match.
+  This keeps Chunk 17's refusal path intact for callers that only have digests.
+- A change to the tool inventory or policy *is* refused, because it changes what the model can do, and the
+  comparison would then be about two different agents.
+
+### 2. Selection in the loop
+
+One iteration late by construction: a candidate only exists once it has been measured, so the comparison
+happens on the execution *after* the improvement.
+
+- The incumbent (the harness that was measured before the edit) is offered as a candidate too, because "keep
+  what I had" is the only way a Selector can express a revert.
+- Choosing the candidate keeps the edit; choosing the incumbent restores the exact snapshot (`tree`,
+  `baseline`, `compiled`, `inventoryHash`) that was measured.
+- A refusal keeps the edit: "I could not compare" is not evidence that the change was worse. The reason is
+  recorded in `RunHarnessResult.selections`.
+- Choosing the incumbent restores the measured tree and then *re-renders* it: `LongTermMEMORY.md` and the
+  compiled prompt are rebuilt from the restored tree, because lessons are knowledge the run gained, not part of
+  the edit being undone.
+- The Selector's `ask` was rewritten in the same change: it used to tell the model to refuse when digests
+  differ, which would have refused every candidate the new gate admits.
+- **Not in the ledger.** The ledger has no selection event kind; `improvement.finished: accepted` records the
+  Improver's decision, and a later revert appears only in the run result and the progress log. Adding a kind
+  is a versioned change to the event schema, deliberately left out of this pass.
+
+### 3. Write-back
+
+`writeBack` (default **on** for the CLI and MCP; off for `--dry-run`, `--no-write-back`, and library callers
+that do not ask) copies the winning harness into the target repository.
+
+- Only harness text: `.clinerules/**`, `EXPERIENCE.md`, `LongTermMEMORY.md`, `systemprompt.md`. Never
+  `tools/**` (it changes what the model may call) or `.cline/skills/**` (it installs code).
+- Only files whose bytes moved; everything else is reported unchanged and not rewritten.
+- Never a deletion, and never an empty file: removing a rule from someone's repository is not an improvement.
+- `LongTermMEMORY.md` is the one file a run may create, because the loop owns it.
+- **Symlinks are followed, then checked.** `.clinerules` is usually a symlink into the operator's config
+  repository, and writing through it is the point of that arrangement — but only when the write would land
+  inside the workspace or the SSOT root. The check resolves the *leaf chain by hand* and the *deepest existing
+  parent*, because a leaf `lstat` sees a regular file through a directory link and a dangling link throws
+  `ENOENT` (which `writeFile` would turn into "create the destination"). Both roots are compared as realpaths:
+  on macOS `/var` is a symlink to `/private/var`, and an unresolved root makes every legitimate link an escape.
+- `created`/`updated` describes the *filesystem*, not the tree: a captured file the working copy does not
+  contain is created.
+
+### 4. MCP server
+
+`bin/harness2-mcp.mjs` starts `src/mcp/main.ts`: JSON-RPC 2.0 over stdin/stdout, one object per line, no SDK
+dependency. Methods: `initialize`, `notifications/initialized`, `ping`, `tools/list`, `tools/call`. A malformed
+line is answered with `-32700` and the server keeps serving.
+
+A request with no `id` is a notification and is never answered, for any method; a malformed line is answered
+with `-32700` and the server keeps serving. Every failure inside a tool call becomes an `isError: true` result
+with a message, because a rejected promise would leave the client waiting forever.
+
+`harness2_run` takes `{ task, repo?, k?, writeBack? }` — only `task` is required. Everything else resolves
+from `config.ts` defaults and the environment, exactly as the CLI does, and the result reports `outcome`,
+`reason`, `counts` (executions, improvements, acceptedImprovements, lessons), `selections`, `improvedFiles` and
+the ledger path. A failed run is a tool *result* with `isError: true`, not a broken server, so the agent can
+read the reason and continue.
+
+```json
+{
+  "mcpServers": {
+    "harness2": {
+      "command": "node",
+      "args": ["/Users/johnraymon/Projects/cline-harness2/bin/harness2-mcp.mjs"],
+      "env": { "SOLVER_API_KEY": "<key>" }
+    }
+  }
+}
+```
+
+**What is not done.** No live model run: no solver key in this environment, so the live half stays unverified.
+The MCP server exposes one tool and no resources/prompts; it has no cancellation support (a long run finishes
+or times out, and `notifications/cancelled` is accepted but ignored), and `k > 1` remains unexercised end to
+end. Write-back does not create a backup or a git commit, so an operator who dislikes the result reverts with
+their own VCS — which is the only undo this project can honestly offer.
