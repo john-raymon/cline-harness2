@@ -621,3 +621,52 @@ exercises this through the real tool object with a fake SDK underneath; there is
 what remains unproven is that a real provider round-trip through `spawn_subagent` behaves like the fake.
 `maxIterations` defaults to 4 for children without a claim behind that number, and the child's
 `promptSha256` is the parent's compiled prompt because no separate child prompt is compiled.
+
+### 12. T4 detector
+
+`src/context/` measures the request and recommends an action. It answers three questions and refuses a
+fourth: how big is the context, which part may be rewritten, and could a summary reach the target — but it
+does not claim to know the provider's token count.
+
+**No tokenizer, and the estimate says so.** `createEstimator` charges `ceil(utf8Bytes / bytesPerToken)` per
+serialized payload plus a per-message and per-tool framing allowance. The ratio of 3 is conservative for
+ASCII prose and code and roughly one-to-one for CJK; it is explicitly *not* an upper bound, because payloads
+dense in punctuation, digit runs or JSON escapes can cost more than one token per three bytes. Every
+measurement carries an `estimatorId`, so a record cannot be read as if a later calibrated estimator produced
+it. A payload that cannot be serialized raises `CONTEXT_MEASURE_INVALID` rather than collapsing to a short
+marker — measuring a 600k cyclic message as ten tokens and reporting `ok` is the worst failure available to
+a detector.
+
+**`tier` is advisory.** `tokens >= b2` recommends `compact`, `tokens >= b1` recommends `stub`, below `b1`
+recommends nothing. `B4.compaction` stays unverified, so `compact` means "the hard threshold was crossed",
+never "a summariser ran"; the executor is expected to refuse the SDK's own `compact` path, which is why
+`feasibility` is reported alongside the tier instead of being left for the executor to re-derive.
+
+**The tail is a budget met from the end.** Messages are grouped first: an assistant message carrying tool
+calls and the `tool` messages answering it are one indivisible run, because preserving results while
+rewriting away their request produces a request the provider rejects. Id matching is used only when *every*
+call in the turn carries an id — a partial set would make the id-less call's own result look foreign and
+split the pair, so a partial set falls back to positional grouping and over-preserves instead. The final
+group is always preserved, and earlier groups join it only while the accumulated estimate stays within
+`tailTokens`. "At least 24k" with unbounded overshoot could preserve 111k — above the 105k target and below
+the 160k refusal threshold, i.e. a tail that can be neither compacted to target nor refused — so the budget
+is met from the end and `oversizeTailGroup` reports the one exception.
+
+**Candidates are runs, and the task is not one.** `stubCandidates` lists every index in a group that lies
+entirely before the tail, excluding any group anchored at index 0 and any group containing a system message.
+Enumerating positions instead would offer a `tool` result for stubbing while its request stayed preserved.
+
+**Feasibility subtracts everything rewriting cannot touch.** `summaryBudget = targetTokens - (total -
+eligible) - SUMMARY_FRAMING_TOKENS`, where `total - eligible` covers the always-on text, the preserved tail,
+the task at index 0 and any system message in the prefix. Charging only the fixed text and the tail reported
+`fits` for targets a 110k task alone already exceeded. `NOTHING_ELIGIBLE` and `TARGET_UNREACHABLE` are
+reported even when the tier is `ok`: saying `fits` about a compaction that would replace nothing is the same
+false claim in a quieter voice.
+
+**Debt.** Nothing here proves the estimate agrees with `DeepSeek-V4.1-Flash`; that needs the usage telemetry
+`parseStartResult` still discards, and until it exists the post-rewrite assertion Chunk 13 makes must be
+"estimated target met", never "target met". `tools` must be passed in its wire shape — a raw SDK object
+holding a Zod schema would serialize the schema's internals and inflate `fixed`. `detectContext` re-serializes
+the system prompt and tool list on every call, which is twice per turn once the executor exists; a cache keyed
+by object identity belongs there, not here. And the ledger still has no compaction event kind, so
+`overflow_recovery` residuals have nowhere to go until Chunk 13 decides whether to add one.
