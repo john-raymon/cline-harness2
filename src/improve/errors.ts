@@ -12,6 +12,11 @@ export type ImproveErrorCode =
   | "PROPOSAL_EMPTY"
   | "PROPOSAL_TOO_BROAD"
   | "PROPOSAL_EMPTIES_TREE"
+  | "SELECTION_UNMATCHED"
+  | "SELECTION_UNPARSEABLE"
+  | "SELECTION_UNKNOWN_CANDIDATE"
+  | "REFLECTION_UNPARSEABLE"
+  | "REFLECTION_INCOMPLETE"
 
 export class ImproveError extends Error {
   override readonly name = "ImproveError"

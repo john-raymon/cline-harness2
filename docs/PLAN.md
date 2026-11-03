@@ -23,7 +23,7 @@ end of every chunk so scope survives a context reset.
 | 14 | impl ✓ | Oracle clients | gemini + astra behind Improver/Composer/Selector/Reflector roles, raw context in every call | one real call per role |
 | 15 | impl ✓ | Dual-oracle arbitration | compare oracle outputs, `off` by default, `probe` outside the ledger | disagreement is surfaced, not averaged |
 | 16 | impl ✓ | Improver loop | propose `e_{k+1}` from `e_k` evidence | proposals are patches, not rewrites |
-| 17 | draft | Selector + Reflector | matched-contrast probe (fingerprint must agree), reflections from failures | unequal probes are refused |
+| 17 | impl ✓ | Selector + Reflector | matched-contrast probe (fingerprint must agree), reflections from failures | unequal probes are refused |
 | 18 | draft | Lesson library | capture lessons, dedupe, cap, feed `LongTermMEMORY.md` | a duplicate lesson is not re-added |
 | 19 | draft | Budget + stop conditions | enforce 4k executions / 3k improvements, halting rules | run stops exactly on budget |
 | 20 | draft | CLI | `src/cli.ts` + `bin`, argv parsing, exit codes, `--help` from `CONFIG_KEYS` | help text cannot drift from the table |

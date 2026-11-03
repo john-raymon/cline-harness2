@@ -849,3 +849,42 @@ is recorded in the ledger yet — `improvement.started`/`improvement.finished` b
 the budget, and a proposal that is refused mid-iteration must not be counted as an improvement. The
 `DELETE` sentinel is also a real hazard: a file whose entire content is the word `DELETE` cannot be
 proposed through this format.
+
+## Selector and Reflector (Chunk 17)
+
+Two halves of "is the new harness better, and what did we learn". Both refuse more than they accept.
+
+1. **A selection is a matched contrast, enforced before the call.** Every candidate carries the digest of
+   the `ProbeFingerprint` it was measured under, and one that differs from the baseline's is
+   `SELECTION_UNMATCHED` — reported with the offending candidate and its digest, and refused *without*
+   spending an oracle call. A faster run under a different model, tool policy or dirty tree is not a
+   faster harness, and the number that looks better is the one that gets mistaken for a result.
+2. **The oracle is told the digests too.** The context carries `baseline/<id>/fingerprint.sha256` and one
+   `<candidate>/fingerprint.sha256` per candidate beside its probe, so a Selector that will not refuse a
+   confounded comparison is failing the instruction it was given. The harness does not depend on that
+   compliance: the check above is deterministic.
+3. **A choice has to name a candidate.** `CHOICE: <id>` is parsed out of the reply; no such line is
+   `SELECTION_UNPARSEABLE`, and an id that is not on the list is `SELECTION_UNKNOWN_CANDIDATE`. Two
+   candidates sharing one id are refused before the call, because a choice between two rows with one name
+   cannot be attributed afterwards.
+4. **A reflection is four labelled lines, not a paragraph.** `CUE:`, `LESSON:`, `EVIDENCE:`, `CONFIDENCE:`
+   are parsed into the existing `lessonSchema`. A reply with none of them is `REFLECTION_UNPARSEABLE`; one
+   with some is `REFLECTION_INCOMPLETE`, which names what is missing.
+5. **Confidence carries its reason.** `CONFIDENCE: high` alone is refused: the schema requires `why`, and a
+   bare level is a claim with nothing behind it. The level itself is one of `high | medium | low`.
+6. **Reflecting on nothing is refused.** With no failure rows there is nothing to generalise from, so no
+   call is made — a lesson invented without evidence is a guess wearing a lesson's shape.
+
+**What is not done.** Nothing here writes a lesson into a library: dedupe, the cap and
+`LongTermMEMORY.md` are Chunk 18. The Selector does not re-run probes or repair a mismatched fingerprint;
+refusing is the whole answer, and producing a matched contrast is the caller's job. `isUsableLesson` is
+not applied to a fresh lesson either — every required field is already non-empty by schema, so it becomes
+meaningful only once a library can hold a partially-filled entry.
+
+**Review fixes folded into this chunk.** `\s*` after a label is `[^\S\r\n]*`: in multiline mode `\s`
+matches a newline, so an empty `CUE:` would have captured the next line and one line could satisfy two
+fields. Labels are matched with `matchAll`, so a reply naming two candidates or stating `CUE` twice is
+refused instead of resolving to whichever came first. Both digests are validated as sha256 before they are
+compared — two empty strings would otherwise have "matched" and let an unmeasured probe through the gate
+this chunk exists for. And a reflection's refusal carries its own code instead of the caller inferring it
+from the wording of a message.
