@@ -1,0 +1,43 @@
+# Gitleaks configuration.
+#
+# The default rule set does the actual work. This file exists only to stop the scan
+# firing on fixtures this repository deliberately keeps, and to make that suppression
+# reviewable — an unexplained allowlist is how a real leak gets waved through.
+#
+# Policy: every entry is an EXACT literal string. Never add a path here (`^test/`,
+# `^runs/`). A path allowlist would hide precisely the mistake worth catching: a real
+# key pasted into a test file. A file-level suppression for one known literal can also
+# be spelled inline with `gitleaks:allow`, which is preferred when the fixture lives on
+# one line and the intent is obvious.
+#
+# `regexTarget = "match"` tests these literals against the detected secret's own match
+# text, not the whole source line. With `"line"`, a real key sharing a line with one of
+# these fixtures would be suppressed along with it.
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Fake keys whose only job is to prove redaction and validation reject them"
+regexTarget = "match"
+regexes = [
+  # test/config.test.ts — proves a coerced key never reaches an error message.
+  '''sk-test-do-not-log-123''',
+  # test/config.test.ts — proves trimming does not smuggle the key into the error.
+  '''sk-padded-do-not-log-456''',
+  # test/config.test.ts — precedence chain fixtures (which variable wins).
+  '''sk-first-secret''',
+  '''sk-second-secret''',
+  '''sk-cli-secret''',
+  '''sk-solver-only''',
+  # test/config.test.ts + test/oracle-client.test.ts — oracle routing fixtures.
+  '''gemini-key-live''',
+  '''astra-key-live''',
+  # test/** — generic placeholders shared by the fixtures and child processes.
+  '''test-key-never-real''',
+  '''scripted-key-never-sent''',
+  '''live-test-key''',
+  # test/run-harness-guards.test.ts — a key-shaped string used to assert the guard
+  # refuses to run a live call without an explicit opt-in.
+  '''sk-live-0123456789abcdef''',
+]

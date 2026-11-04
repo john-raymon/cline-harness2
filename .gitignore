@@ -3,7 +3,11 @@ dist/
 .tmp/
 .worktrees/
 vendor/
+# A bare `.env` rule misses `.env.local` / `.env.live`, which the live oracle and SDK
+# spike runs invite you to create.
 .env
+.env.*
+!.env.example
 
 # Run artifacts are evidence, not source. `runs/` holds every ledger and materialised tree a run
 # produced, and a per-execution tree is anchored inside its own run directory — but an older build

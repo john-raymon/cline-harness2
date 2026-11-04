@@ -9,7 +9,11 @@
     "oracle:live": "HARNESS2_LIVE_ORACLE=on node --import tsx --test test/oracle-live.test.ts",
     "spike:sdk": "node --import tsx spikes/sdk.ts",
     "verify:e2e": "node --import tsx scripts/verify-e2e.ts",
-    "mcp": "node bin/harness2-mcp.mjs"
+    "mcp": "node bin/harness2-mcp.mjs",
+    "prepare": "node scripts/install-hooks.mjs",
+    "hooks:install": "node scripts/install-hooks.mjs",
+    "secrets:scan": "gitleaks git --config .gitleaks.toml --log-opts=\"--all\" --redact --no-banner --verbose .",
+    "secrets:staged": "gitleaks git --pre-commit --staged --config .gitleaks.toml --redact --no-banner ."
   },
   "bin": {
     "harness2": "bin/harness2.mjs",

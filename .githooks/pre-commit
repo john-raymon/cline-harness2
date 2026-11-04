@@ -1,0 +1,47 @@
+#!/bin/sh
+# Refuse a commit whose staged diff contains a credential.
+#
+# Fail-closed on purpose: a missing scanner is a broken gate, not a pass. Two escape
+# hatches exist and both are loud in the output, so an unscanned commit leaves a trace
+# in the terminal instead of looking like a clean one:
+#   - HARNESS2_SKIP_SECRET_SCAN=1   skips only this check
+#   - git commit --no-verify        skips every hook
+#
+# Installed by `node scripts/install-hooks.mjs` (also runs from `pnpm install`), which
+# points core.hooksPath at this tracked directory.
+set -eu
+
+if [ "${HARNESS2_SKIP_SECRET_SCAN:-}" = "1" ]; then
+  echo "pre-commit: secret scan SKIPPED via HARNESS2_SKIP_SECRET_SCAN=1" >&2
+  exit 0
+fi
+
+# Hooks run from the worktree root, but resolve it explicitly rather than trusting that.
+root=$(git rev-parse --show-toplevel)
+cd "$root"
+
+if ! command -v gitleaks >/dev/null 2>&1; then
+  echo "pre-commit: gitleaks is not installed, so the staged diff went unscanned." >&2
+  echo "  install: brew install gitleaks" >&2
+  echo "  bypass:  git commit --no-verify" >&2
+  exit 1
+fi
+
+# `gitleaks git --staged` arrived in v8.19; older binaries only know `protect`/`detect`,
+# and silently running those would scan the wrong thing.
+if ! gitleaks git --help >/dev/null 2>&1; then
+  echo "pre-commit: gitleaks $(gitleaks version 2>/dev/null || echo '(unknown version)') is too old; need v8.19 or newer." >&2
+  echo "  upgrade: brew upgrade gitleaks" >&2
+  exit 1
+fi
+
+if ! gitleaks git --pre-commit --staged --config "$root/.gitleaks.toml" --redact --no-banner .; then
+  echo "" >&2
+  echo "pre-commit: BLOCKED - the staged diff contains something that looks like a credential." >&2
+  echo "" >&2
+  echo "  real key -> remove it from the commit, then rotate it. Removing the file in a" >&2
+  echo "              later commit is not enough: it stays in history." >&2
+  echo "  test fixture -> add the exact literal to .gitleaks.toml, or mark the line with" >&2
+  echo "              a trailing 'gitleaks:allow' comment. Never allowlist a path." >&2
+  exit 1
+fi
