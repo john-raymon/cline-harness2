@@ -1,4 +1,0 @@
-{"version":1,"seq":1,"at":"2026-11-03T12:24:33.512Z","kind":"run.started","runId":"run-mw0nty9p-xyf853","baselineSha":"5999e085cc8023283198710074ae8c9f19f1d1a63bf13e9923a8dffac3c0139b","probeSha":null,"providerId":"openai-compatible","modelId":"hf:deepseek-ai/DeepSeek-V4.1-Flash-1017","baseUrl":"https://api.synthetic.new/openai/v1","promptSha256":"5261a3739d9f302d7ea9c2030847f83bc37dd0686ba5c93e3746ec7abe2745a6","toolPolicySet":["default:deny"],"toolInventoryHash":"4e31f87995c1e1a0cc00996cd76dc6f93f86e6066c732a2c95020772aeabf3fd","k":2}
-{"version":1,"seq":2,"at":"2026-11-03T12:24:33.520Z","kind":"execution.started","executionId":"exec-1","taskId":"task-1"}
-{"version":1,"seq":3,"at":"2026-11-03T12:24:33.526Z","kind":"execution.finished","executionId":"exec-1","outcome":"error"}
-{"version":1,"seq":4,"at":"2026-11-03T12:24:33.531Z","kind":"run.finished","outcome":"failed","executions":1,"improvements":0,"physicalAttempts":0}

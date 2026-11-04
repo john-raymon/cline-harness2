@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 
 import { environmentMismatches, type ProbeEnvironment } from "../src/fingerprint/probe.ts"
-import { DEFAULT_SELECTOR_ASK, selectCandidate } from "../src/improve/selector.ts"
+import { DEFAULT_SELECTOR_ASK, readChoice, selectCandidate } from "../src/improve/selector.ts"
 import { oracleRoles } from "../src/oracle/client.ts"
 import { geminiAnswer, geminiClient, scripted } from "./support/oracle-fixtures.ts"
 
@@ -107,5 +107,118 @@ describe("selectCandidate environment gate", () => {
     assert.deepEqual(environmentMismatches(ENV, { ...ENV, toolPolicySet: ["default:allow"] }), [
       "toolPolicySet",
     ])
+  })
+})
+
+/**
+ * Reading the `CHOICE:` line a model actually writes.
+ *
+ * A live run refused all six selections. Two separate defects: the model answered with the only identifier it
+ * could see (`candidates/exec-2`, because that is how the context labels each probe) and the gate accepted
+ * only the bare id; and a legitimate `NONE`/`REFUSED` was recorded as `SELECTION_UNKNOWN_CANDIDATE`, the same
+ * code as an invented id, so a refusal and a hallucination were indistinguishable. Both are pinned here.
+ */
+
+const IDS = new Set(["exec-1", "exec-2"])
+
+async function compare(reply: string) {
+  const script = scripted([geminiAnswer(reply)])
+  const outcome = await selectCandidate({
+    selector: oracleRoles(geminiClient(script)).selector,
+    baseline: { id: "exec-1", fingerprintSha256: BASELINE_DIGEST, environment: ENV },
+    candidates: [
+      {
+        id: "exec-1",
+        fingerprintSha256: BASELINE_DIGEST,
+        probe: "the harness that was already measured",
+        environment: ENV,
+      },
+      {
+        id: "exec-2",
+        fingerprintSha256: CANDIDATE_DIGEST,
+        probe: "the improved harness",
+        environment: ENV,
+      },
+    ],
+  })
+  return { outcome, script }
+}
+
+describe("selectCandidate reads the choice the model actually wrote", () => {
+  it("resolves the context path the model is shown, not just the bare id", async () => {
+    const { outcome } = await compare("CHOICE: candidates/exec-2")
+    assert.equal(outcome.status, "selected")
+    if (outcome.status !== "selected") return
+    assert.equal(outcome.candidateId, "exec-2")
+  })
+
+  it("resolves a deeper path, a backticked id and a quoted id to the same candidate", async () => {
+    for (const reply of [
+      "CHOICE: candidates/exec-2/probe.md",
+      "CHOICE: `exec-2`",
+      'CHOICE: "exec-2"',
+      "CHOICE: exec-2.",
+    ]) {
+      const { outcome } = await compare(reply)
+      assert.equal(outcome.status, "selected", `${reply} should select exec-2`)
+      if (outcome.status !== "selected") continue
+      assert.equal(outcome.candidateId, "exec-2")
+    }
+  })
+
+  it("still selects the incumbent, so a revert stays expressible", async () => {
+    const { outcome } = await compare("CHOICE: candidates/exec-1")
+    assert.equal(outcome.status, "selected")
+    if (outcome.status !== "selected") return
+    assert.equal(outcome.candidateId, "exec-1")
+  })
+
+  it("records an explicit decline as a decline, not as an unknown candidate", async () => {
+    for (const reply of [
+      "CHOICE: NONE",
+      "CHOICE: REFUSED",
+      "CHOICE: none",
+      "CHOICE: REFUSE: the probes are not comparable",
+    ]) {
+      const { outcome } = await compare(reply)
+      assert.equal(outcome.status, "refused", `${reply} should be refused`)
+      if (outcome.status !== "refused") continue
+      assert.equal(outcome.code, "SELECTION_MODEL_DECLINED", `${reply} is a decision, not a typo`)
+    }
+  })
+
+  it("keeps an invented id distinct from a decline", async () => {
+    const { outcome } = await compare("CHOICE: candidates/exec-9")
+    assert.equal(outcome.status, "refused")
+    if (outcome.status !== "refused") return
+    assert.equal(outcome.code, "SELECTION_UNKNOWN_CANDIDATE")
+  })
+
+  it("tells the oracle the bare ids it will be graded on", async () => {
+    const { script } = await compare("CHOICE: exec-2")
+    const sent = JSON.stringify(script.requests[0])
+    assert.match(sent, /candidates\/ids\.txt/, "the ids are supplied as context, not only as prose")
+    assert.match(sent, /exec-2/, "the accepted token is visible in the request")
+    assert.match(sent, /not a path such as/, "the ask says which shape it wants back")
+  })
+})
+
+describe("readChoice", () => {
+  it("normalises every shape a model uses into the bare id", () => {
+    for (const raw of ["exec-2", "`exec-2`", "candidates/exec-2", "candidates/exec-2/probe.md", "exec-2."]) {
+      assert.deepEqual(readChoice(raw, IDS), { kind: "candidate", id: "exec-2" }, raw)
+    }
+  })
+
+  it("does not invent a candidate out of a path that names nobody", () => {
+    assert.deepEqual(readChoice("candidates/exec-9", IDS), { kind: "unknown" })
+    assert.deepEqual(readChoice("something-else", IDS), { kind: "unknown" })
+    assert.deepEqual(readChoice("", IDS), { kind: "unknown" })
+  })
+
+  it("reads a decline and the reason attached to it", () => {
+    for (const raw of ["NONE", "none", "REFUSED", "REFUSE: the probes differ"]) {
+      assert.deepEqual(readChoice(raw, IDS), { kind: "declined" }, raw)
+    }
   })
 })

@@ -4,3 +4,9 @@ dist/
 .worktrees/
 vendor/
 .env
+
+# Run artifacts are evidence, not source. `runs/` holds every ledger and materialised tree a run
+# produced, and a per-execution tree is anchored inside its own run directory — but an older build
+# wrote them beside the repository root, so both shapes are ignored.
+runs/
+run-*-exec-*/

@@ -306,6 +306,9 @@ export async function runHarness(input: RunHarnessInput): Promise<RunHarnessResu
           evidencePath,
           installedSdkVersion,
           runId: `${runId}-${executionId}`,
+          // Anchored inside this run's own directory: `config.root` is the repository, so leaving this
+          // to default wrote one `run-*-exec-*` tree per execution into the repo root.
+          rootDir: runDir,
           ...(deps.loadSdk === undefined ? {} : { deps: { loadSdk: deps.loadSdk } }),
           ...(input.signal === undefined ? {} : { signal: input.signal }),
         })

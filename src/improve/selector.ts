@@ -61,6 +61,64 @@ export type SelectionResult =
 
 const CHOICE_LINE = /^CHOICE:[^\S\r\n]*(.+?)[^\S\r\n]*$/gm
 
+/** Tokens a model uses when it means "I will not pick one of these". Compared case-insensitively. */
+const DECLINE_TOKENS = new Set(["none", "refuse", "refused", "decline", "declined"])
+
+/** Wrappers a model puts around a token it was asked to repeat: backticks, quotes, emphasis, full stop. */
+function stripWrappers(value: string): string {
+  let out = value.trim()
+  for (;;) {
+    const before = out
+    out = out
+      .replace(/^[`'"*_]+/, "")
+      .replace(/[`'"*_]+$/, "")
+      .replace(/[.,;]+$/, "")
+      .trim()
+    if (out === before) return out
+  }
+}
+
+export type ChoiceReading =
+  | { readonly kind: "candidate"; readonly id: string }
+  | { readonly kind: "declined" }
+  | { readonly kind: "unknown" }
+
+/**
+ * Read a `CHOICE:` value as the bare id the gate is going to check.
+ *
+ * The probes reach the model as `candidates/<id>/probe.md` and `candidates/<id>/fingerprint.sha256`, so the
+ * most natural reply names the path it can actually see (`CHOICE: candidates/exec-2`) rather than the bare
+ * id. Grading only the bare id refused every such reply as an unknown candidate — the prompt and the gate
+ * have to encode the same invariant, or an obedient model fails the check it was answering.
+ *
+ * A decline is a decision too. `NONE` and `REFUSED` were reported as `SELECTION_UNKNOWN_CANDIDATE`, the same
+ * code as an invented id, which made "the model would not choose" indistinguishable from "the model made one
+ * up" and threw away the only information the reply carried.
+ */
+export function readChoice(raw: string, ids: ReadonlySet<string>): ChoiceReading {
+  const cleaned = stripWrappers(raw)
+  if (cleaned.length === 0) return { kind: "unknown" }
+
+  // `REFUSE: the probes are not comparable` — the decision is the first token, the rest is the reason.
+  const head = stripWrappers(cleaned.split(/[:\s]/, 1)[0] ?? "")
+  if (DECLINE_TOKENS.has(head.toLowerCase())) return { kind: "declined" }
+
+  if (ids.has(cleaned)) return { kind: "candidate", id: cleaned }
+
+  const segments = cleaned.split("/").map(stripWrappers)
+  // `candidates/<id>` and `candidates/<id>/probe.md` both name the id in the second segment. The directory
+  // is matched case-insensitively because a model may capitalise it; the id itself is matched exactly.
+  const named = segments.length > 1 && segments[0]?.toLowerCase() === "candidates" ? segments[1] : undefined
+  if (named !== undefined && ids.has(named)) return { kind: "candidate", id: named }
+
+  // `exec-2 because it cites the rule it applies` — the id is the first token of a sentence.
+  const first = stripWrappers(cleaned.split(/\s/, 1)[0] ?? "")
+  if (ids.has(first)) return { kind: "candidate", id: first }
+
+  for (const segment of segments) if (ids.has(segment)) return { kind: "candidate", id: segment }
+  return { kind: "unknown" }
+}
+
 /**
  * The instruction the Selector receives.
  *
@@ -137,7 +195,13 @@ export async function selectCandidate(input: SelectCandidateInput): Promise<Sele
       ? []
       : [{ path: `${id}/environment.json`, body: `${JSON.stringify(environment, null, 2)}\n` }]
 
+  // The bare ids the gate will accept, listed for the model *and* supplied as context. The probes are
+  // labelled with their paths, so without this the only identifier visible in the request is
+  // `candidates/<id>` — a token the gate does not accept.
+  const ids = [...seen]
+
   const context: RawContextSource[] = [
+    { path: "candidates/ids.txt", body: `${ids.join("\n")}\n` },
     {
       path: `baseline/${input.baseline.id}/fingerprint.sha256`,
       body: `${input.baseline.fingerprintSha256}\n`,
@@ -162,8 +226,16 @@ export async function selectCandidate(input: SelectCandidateInput): Promise<Sele
     }
   }
 
+  const baseAsk =
+    input.ask === undefined || input.ask.trim().length === 0 ? DEFAULT_SELECTOR_ASK : input.ask.trim()
+  // Stated in the ask itself, not only in the context: the rule the gate applies is the rule the model is
+  // given, and a naming convention it has to infer from file paths is not a rule it was told.
+  const ask =
+    `${baseAsk}\n\nValid candidate ids: ${ids.map((id) => `\`${id}\``).join(", ")}. ` +
+    "Answer with exactly one of those tokens, not a path such as `candidates/<id>`."
+
   const reply = await input.selector.select({
-    ask: input.ask === undefined || input.ask.trim().length === 0 ? DEFAULT_SELECTOR_ASK : input.ask,
+    ask,
     context,
     ...(input.timeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs }),
   })
@@ -188,14 +260,25 @@ export async function selectCandidate(input: SelectCandidateInput): Promise<Sele
       reason: "the reply contains no `CHOICE: <candidate>` line, so there is no decision to record",
     }
   }
-  if (!seen.has(chosen)) {
+  const reading = readChoice(chosen, seen)
+  if (reading.kind === "declined") {
+    return {
+      status: "refused",
+      code: "SELECTION_MODEL_DECLINED",
+      reply,
+      reason:
+        `the reply declined to choose (${JSON.stringify(chosen)}). A decline is a decision, so it is ` +
+        "recorded as one rather than as a candidate nobody named",
+    }
+  }
+  if (reading.kind === "unknown") {
     return {
       status: "refused",
       code: "SELECTION_UNKNOWN_CANDIDATE",
       reply,
       reason: `the reply chose ${JSON.stringify(chosen)}, which is not one of the candidates ` +
-        `(${[...seen].join(", ")})`,
+        `(${ids.join(", ")})`,
     }
   }
-  return { status: "selected", reply, candidateId: chosen }
+  return { status: "selected", reply, candidateId: reading.id }
 }
