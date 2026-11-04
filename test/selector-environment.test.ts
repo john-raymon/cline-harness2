@@ -205,7 +205,14 @@ describe("selectCandidate reads the choice the model actually wrote", () => {
 
 describe("readChoice", () => {
   it("normalises every shape a model uses into the bare id", () => {
-    for (const raw of ["exec-2", "`exec-2`", "candidates/exec-2", "candidates/exec-2/probe.md", "exec-2."]) {
+    for (const raw of [
+      "exec-2",
+      "`exec-2`",
+      "candidates/exec-2",
+      "candidates/exec-2/probe.md",
+      "./candidates/exec-2/probe.md",
+      "exec-2.",
+    ]) {
       assert.deepEqual(readChoice(raw, IDS), { kind: "candidate", id: "exec-2" }, raw)
     }
   })
@@ -214,6 +221,24 @@ describe("readChoice", () => {
     assert.deepEqual(readChoice("candidates/exec-9", IDS), { kind: "unknown" })
     assert.deepEqual(readChoice("something-else", IDS), { kind: "unknown" })
     assert.deepEqual(readChoice("", IDS), { kind: "unknown" })
+  })
+
+  it("never turns a rejection into a selection", () => {
+    // A segment scan would read `not candidates/exec-2` as a vote *for* exec-2, which is the opposite of
+    // what the model said. An unreadable reply is the honest outcome.
+    for (const raw of [
+      "not candidates/exec-2",
+      "neither candidates/exec-1 nor candidates/exec-2",
+      "I decline candidates/exec-2",
+    ]) {
+      assert.deepEqual(readChoice(raw, IDS), { kind: "unknown" }, raw)
+    }
+  })
+
+  it("leaves an id that starts with a wrapper character intact", () => {
+    const underscoreIds = new Set(["_exec-2", "*exec-3"])
+    assert.deepEqual(readChoice("_exec-2", underscoreIds), { kind: "candidate", id: "_exec-2" })
+    assert.deepEqual(readChoice("*exec-3", underscoreIds), { kind: "candidate", id: "*exec-3" })
   })
 
   it("reads a decline and the reason attached to it", () => {

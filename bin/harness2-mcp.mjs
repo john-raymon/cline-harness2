@@ -10,6 +10,7 @@
 // writing ledger events and per-execution trees after the client had already given up. Every stop path
 // therefore forwards to the child, and a child that will not stop is killed rather than orphaned.
 import { spawn } from "node:child_process";
+import { constants as osConstants } from "node:os";
 import { fileURLToPath } from "node:url";
 
 /** How long a SIGTERMed child gets to unwind before it is killed outright. */
@@ -47,7 +48,9 @@ child.on("exit", (code, signal) => {
     clearTimeout(escalation);
     escalation = undefined;
   }
-  process.exitCode = signal === null ? (code ?? 1) : 1;
+  // 128+n is what a shell reports for "died from signal n"; a flat `1` would erase why it stopped.
+  const signalled = signal === null ? 0 : (osConstants.signals[signal] ?? 0);
+  process.exitCode = signal === null ? (code ?? 1) : 128 + signalled;
 });
 
 // The handler deliberately does not exit: the child's `exit` listener sets the code, and exiting here would

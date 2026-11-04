@@ -65,9 +65,11 @@ const CHOICE_LINE = /^CHOICE:[^\S\r\n]*(.+?)[^\S\r\n]*$/gm
 const DECLINE_TOKENS = new Set(["none", "refuse", "refused", "decline", "declined"])
 
 /** Wrappers a model puts around a token it was asked to repeat: backticks, quotes, emphasis, full stop. */
-function stripWrappers(value: string): string {
+function stripWrappers(value: string, ids: ReadonlySet<string>): string {
   let out = value.trim()
   for (;;) {
+    // Never damage a token the gate already accepts: an id may legitimately begin or end with `_` or `*`.
+    if (ids.has(out)) return out
     const before = out
     out = out
       .replace(/^[`'"*_]+/, "")
@@ -96,26 +98,28 @@ export type ChoiceReading =
  * up" and threw away the only information the reply carried.
  */
 export function readChoice(raw: string, ids: ReadonlySet<string>): ChoiceReading {
-  const cleaned = stripWrappers(raw)
+  const cleaned = stripWrappers(raw, ids)
   if (cleaned.length === 0) return { kind: "unknown" }
 
   // `REFUSE: the probes are not comparable` — the decision is the first token, the rest is the reason.
-  const head = stripWrappers(cleaned.split(/[:\s]/, 1)[0] ?? "")
+  const head = stripWrappers(cleaned.split(/[:\s]/, 1)[0] ?? "", ids)
   if (DECLINE_TOKENS.has(head.toLowerCase())) return { kind: "declined" }
 
   if (ids.has(cleaned)) return { kind: "candidate", id: cleaned }
 
-  const segments = cleaned.split("/").map(stripWrappers)
+  // `./candidates/<id>` and `/candidates/<id>` name the same file, so the prefix comes off before splitting.
+  const segments = cleaned.replace(/^(?:\.\/|\/)+/, "").split("/").map((part) => stripWrappers(part, ids))
   // `candidates/<id>` and `candidates/<id>/probe.md` both name the id in the second segment. The directory
   // is matched case-insensitively because a model may capitalise it; the id itself is matched exactly.
   const named = segments.length > 1 && segments[0]?.toLowerCase() === "candidates" ? segments[1] : undefined
   if (named !== undefined && ids.has(named)) return { kind: "candidate", id: named }
 
   // `exec-2 because it cites the rule it applies` — the id is the first token of a sentence.
-  const first = stripWrappers(cleaned.split(/\s/, 1)[0] ?? "")
+  const first = stripWrappers(cleaned.split(/\s/, 1)[0] ?? "", ids)
   if (ids.has(first)) return { kind: "candidate", id: first }
 
-  for (const segment of segments) if (ids.has(segment)) return { kind: "candidate", id: segment }
+  // Deliberately no "scan every segment" fallback: `not candidates/exec-2` would then select the very
+  // candidate the model rejected, which is worse than recording the reply as unreadable.
   return { kind: "unknown" }
 }
 
