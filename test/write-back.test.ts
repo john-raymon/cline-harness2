@@ -57,6 +57,43 @@ describe("writeBackHarness", () => {
     assert.equal(await readFile(path.join(dir, "LongTermMEMORY.md"), "utf8"), "# Long-term memory\n")
   })
 
+  it("never writes the generated project-rules.md that sync-rules.mjs owns", async () => {
+    const dir = await repo()
+    await mkdir(path.join(dir, ".clinerules"), { recursive: true })
+    await writeFile(path.join(dir, ".clinerules/project-rules.md"), "AUTO-GENERATED: from folder\n", "utf8")
+    await writeFile(path.join(dir, ".clinerules/core.md"), "old rule\n", "utf8")
+
+    const result = await writeBackHarness({
+      repo: dir,
+      captured: {
+        ".clinerules/project-rules.md": "AUTO-GENERATED: from folder\n",
+        ".clinerules/core.md": "old rule\n",
+      },
+      final: {
+        // A run "improving" the generated copy must not reach the disk: the next sync would drop the edit, and
+        // a rule that exists only here exists in no folder file at all.
+        ".clinerules/project-rules.md": "AUTO-GENERATED: from folder\nplus a rule no folder file has\n",
+        ".clinerules/core.md": "new rule\n",
+      },
+    })
+
+    assert.deepEqual(
+      result.written.map((file) => file.path),
+      [".clinerules/core.md"],
+      "every other .clinerules file is still written back",
+    )
+    const generated = result.skipped.find((skip) => skip.path === ".clinerules/project-rules.md")
+    assert.ok(generated !== undefined, "the generated copy is reported as skipped, not silently dropped")
+    assert.match(generated.reason, /sync-rules\.mjs/)
+    assert.equal(
+      await readFile(path.join(dir, ".clinerules/project-rules.md"), "utf8"),
+      "AUTO-GENERATED: from folder\n",
+      "the file on disk is untouched",
+    )
+    assert.equal(isWriteBackPath(".clinerules/project-rules.md"), false)
+    assert.equal(isWriteBackPath(".clinerules/core.md"), true)
+  })
+
   it("writes through a symlink into the config repository", async () => {
     const dir = await repo()
     const ssot = await repo()

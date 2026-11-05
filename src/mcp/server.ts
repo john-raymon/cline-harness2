@@ -77,6 +77,15 @@ const REPO_RETRY =
   "retry the call and pass the active workspace's absolute path in `repo` " +
   "(e.g. /Users/johnraymon/Projects/<repo>)"
 
+/**
+ * The operator's single source of truth for rules.
+ *
+ * In Multi-Root Mode this *is* Cline's `cwd`, so a caller reaching for "the active workspace" hands us the
+ * config repo without meaning to. `cline-config` holds folder rules and MCP servers, not a project harness:
+ * a run there would capture the config repo as if it were a project and then write back into it.
+ */
+export const SSOT_ROOT = "/Users/johnraymon/Projects/cline-config"
+
 export interface McpDeps {
   /** Overrides for the run, used by tests: the whole loop is already a set of ports. */
   readonly harness?: RunHarnessDeps
@@ -141,6 +150,17 @@ async function runTool(params: Record<string, unknown>, deps: McpDeps): Promise<
       isError: true,
       payload: {
         error: `repo must name a repository workspace, not the filesystem root (${repo}): ${REPO_RETRY}`,
+      },
+    }
+  }
+  if (repo === path.resolve(SSOT_ROOT)) {
+    return {
+      isError: true,
+      payload: {
+        error:
+          `repo must be the active project repository, not the shared config root (${repo}): pass the ` +
+          "absolute path of the sibling project you are working in " +
+          "(e.g. /Users/johnraymon/Projects/<project>), never cline-config",
       },
     }
   }

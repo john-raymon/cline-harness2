@@ -123,6 +123,30 @@ describe("handleRequest", () => {
     assert.match(String(result.structuredContent.error), /task is required/)
   })
 
+  it("refuses the shared config root as `repo`", async () => {
+    let captures = 0
+    const deps: McpDeps = {
+      env: { SOLVER_API_KEY: "scripted-key-never-sent" },
+      harness: {
+        capture: async () => {
+          captures += 1
+          throw new Error("a run must not start in the config repository")
+        },
+      },
+    }
+
+    // In Multi-Root Mode Cline's cwd *is* `cline-config`, so this is the path a caller reaches for by accident.
+    const result = await callTool(
+      32,
+      { task: "do the thing", repo: "/Users/johnraymon/Projects/cline-config" },
+      deps,
+    )
+    assert.equal(result.isError, true)
+    assert.match(String(result.structuredContent.error), /not the shared config root/)
+    assert.match(String(result.structuredContent.error), /sibling project/)
+    assert.equal(captures, 0, "the config repository is refused before any run starts")
+  })
+
   it("rejects a missing, blank, relative or root repo before any run starts", async () => {
     let captures = 0
     const deps: McpDeps = {
