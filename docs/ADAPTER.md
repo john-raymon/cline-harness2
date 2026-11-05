@@ -1151,11 +1151,15 @@ A request with no `id` is a notification and is never answered, for any method; 
 with `-32700` and the server keeps serving. Every failure inside a tool call becomes an `isError: true` result
 with a message, because a rejected promise would leave the client waiting forever.
 
-`harness2_run` takes `{ task, repo?, k?, writeBack? }` — only `task` is required. Everything else resolves
-from `config.ts` defaults and the environment, exactly as the CLI does, and the result reports `outcome`,
-`reason`, `counts` (executions, improvements, acceptedImprovements, lessons), `selections`, `improvedFiles` and
-the ledger path. A failed run is a tool *result* with `isError: true`, not a broken server, so the agent can
-read the reason and continue.
+`harness2_run` takes `{ task, repo, k?, writeBack? }` — `task` and `repo` are both required. `repo` must be an
+absolute path to the workspace the agent is actually working in; it is never defaulted, because the server's
+own `process.cwd()` is the directory it was launched from, not the caller's workspace, and silently improving
+the wrong repository is worse than refusing. A missing, blank, relative or filesystem-root `repo` is answered
+with `isError: true` and a message telling the caller to retry with the active workspace's absolute path —
+before any run starts. Everything else resolves from `config.ts` defaults and the environment, exactly as the
+CLI does, and the result reports `outcome`, `reason`, `counts` (executions, improvements,
+acceptedImprovements, lessons), `selections`, `improvedFiles` and the ledger path. A failed run is a tool
+*result* with `isError: true`, not a broken server, so the agent can read the reason and continue.
 
 ```json
 {

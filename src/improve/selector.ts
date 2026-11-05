@@ -83,43 +83,79 @@ function stripWrappers(value: string, ids: ReadonlySet<string>): string {
 export type ChoiceReading =
   | { readonly kind: "candidate"; readonly id: string }
   | { readonly kind: "declined" }
+  | { readonly kind: "ambiguous"; readonly mentioned: readonly string[] }
   | { readonly kind: "unknown" }
 
-/**
- * Read a `CHOICE:` value as the bare id the gate is going to check.
- *
- * The probes reach the model as `candidates/<id>/probe.md` and `candidates/<id>/fingerprint.sha256`, so the
- * most natural reply names the path it can actually see (`CHOICE: candidates/exec-2`) rather than the bare
- * id. Grading only the bare id refused every such reply as an unknown candidate — the prompt and the gate
- * have to encode the same invariant, or an obedient model fails the check it was answering.
- *
- * A decline is a decision too. `NONE` and `REFUSED` were reported as `SELECTION_UNKNOWN_CANDIDATE`, the same
- * code as an invented id, which made "the model would not choose" indistinguishable from "the model made one
- * up" and threw away the only information the reply carried.
- */
-export function readChoice(raw: string, ids: ReadonlySet<string>): ChoiceReading {
-  const cleaned = stripWrappers(raw, ids)
-  if (cleaned.length === 0) return { kind: "unknown" }
-
-  // `REFUSE: the probes are not comparable` — the decision is the first token, the rest is the reason.
-  const head = stripWrappers(cleaned.split(/[:\s]/, 1)[0] ?? "", ids)
-  if (DECLINE_TOKENS.has(head.toLowerCase())) return { kind: "declined" }
-
-  if (ids.has(cleaned)) return { kind: "candidate", id: cleaned }
-
-  // `./candidates/<id>` and `/candidates/<id>` name the same file, so the prefix comes off before splitting.
+/** The id a piece of text names outright: the bare id, its wrapper, or its `candidates/<id>/...` context path. */
+function exactId(text: string, ids: ReadonlySet<string>): string | undefined {
+  const cleaned = stripWrappers(text, ids)
+  if (cleaned.length === 0) return undefined
+  if (ids.has(cleaned)) return cleaned
   const segments = cleaned.replace(/^(?:\.\/|\/)+/, "").split("/").map((part) => stripWrappers(part, ids))
-  // `candidates/<id>` and `candidates/<id>/probe.md` both name the id in the second segment. The directory
-  // is matched case-insensitively because a model may capitalise it; the id itself is matched exactly.
   const named = segments.length > 1 && segments[0]?.toLowerCase() === "candidates" ? segments[1] : undefined
-  if (named !== undefined && ids.has(named)) return { kind: "candidate", id: named }
+  return named !== undefined && ids.has(named) ? named : undefined
+}
 
-  // `exec-2 because it cites the rule it applies` — the id is the first token of a sentence.
-  const first = stripWrappers(cleaned.split(/\s/, 1)[0] ?? "", ids)
-  if (ids.has(first)) return { kind: "candidate", id: first }
+/** Every candidate id that appears as a standalone token anywhere in the text. */
+function mentionedIds(text: string, ids: ReadonlySet<string>): string[] {
+  const found: string[] = []
+  for (const id of ids) {
+    const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+    if (new RegExp(`(^|[^A-Za-z0-9._-])${escaped}(?=$|[^A-Za-z0-9._-])`).test(text)) found.push(id)
+  }
+  return found
+}
 
-  // Deliberately no "scan every segment" fallback: `not candidates/exec-2` would then select the very
-  // candidate the model rejected, which is worse than recording the reply as unreadable.
+/**
+ * Read a reply as the bare id the gate is going to check.
+ *
+ * Two things made a live run refuse every selection. The probes reach the model as `candidates/<id>/probe.md`,
+ * so the most natural reply names the path it can see (`CHOICE: candidates/exec-2`) rather than the bare id —
+ * the prompt and the gate have to encode the same invariant or an obedient model fails the check it was
+ * answering. And a decline is a decision: `NONE`/`REFUSED` reported as `SELECTION_UNKNOWN_CANDIDATE` were
+ * indistinguishable from an invented id, which threw away the only information the reply carried.
+ *
+ * A reply with no `CHOICE:` line is still read, but only when it *is* a decision: the whole text, or its
+ * first/last non-empty line, has to name one candidate outright. Prose that merely mentions candidate ids is
+ * never upgraded into a choice, because "not candidates/exec-2" would then select the very probe it rejected.
+ */
+export function readChoice(reply: string, ids: ReadonlySet<string>): ChoiceReading {
+  const values = [...reply.matchAll(CHOICE_LINE)]
+    .map((match) => (match[1] ?? "").trim())
+    .filter((value) => value.length > 0)
+
+  if (values.length > 0) {
+    const value = values[0] as string
+    // `REFUSE: the probes are not comparable` — the decision is the first token, the rest is the reason.
+    const head = stripWrappers(value.split(/[:\s]/, 1)[0] ?? "", ids)
+    if (DECLINE_TOKENS.has(head.toLowerCase())) return { kind: "declined" }
+    const exact = exactId(value, ids)
+    if (exact !== undefined) return { kind: "candidate", id: exact }
+    // `exec-2 because it cites the rule it applies` — the id is the first token of a sentence.
+    const first = stripWrappers(value.split(/\s/, 1)[0] ?? "", ids)
+    if (ids.has(first)) return { kind: "candidate", id: first }
+    return { kind: "unknown" }
+  }
+
+  const trimmed = reply.trim()
+  if (trimmed.length === 0) return { kind: "unknown" }
+
+  const wholeExact = exactId(trimmed, ids)
+  if (wholeExact !== undefined) return { kind: "candidate", id: wholeExact }
+
+  // A bare decline — `NONE`, `REFUSED`, `REFUSE: ...` — is a decision even without the `CHOICE:` label.
+  const bareHead = stripWrappers(trimmed.split(/[:\s]/, 1)[0] ?? "", ids)
+  if (DECLINE_TOKENS.has(bareHead.toLowerCase())) return { kind: "declined" }
+
+  // Otherwise only an exact match counts: a sentence that happens to contain an id is prose, not a choice.
+  const lines = trimmed.split(/\r?\n/).map((line) => line.trim()).filter((line) => line.length > 0)
+  for (const text of [lines[0] ?? "", lines.at(-1) ?? ""]) {
+    const exact = exactId(text, ids)
+    if (exact !== undefined) return { kind: "candidate", id: exact }
+  }
+
+  const mentioned = mentionedIds(trimmed, ids)
+  if (mentioned.length > 1) return { kind: "ambiguous", mentioned }
   return { kind: "unknown" }
 }
 
@@ -135,7 +171,9 @@ export const DEFAULT_SELECTOR_ASK =
   "Choose exactly one of the probes below. They were all measured under the same environment — same " +
   "repository state, model, endpoint, tool policy and context policy — so the only thing that differs " +
   "between them is the harness. Their harness digests do differ, and that is expected: the difference is the " +
-  "change being judged. Answer with a single line `CHOICE: <id>` naming one of the listed probe ids."
+  "change being judged. Put your answer on the very first line of your reply — either `CHOICE: <id>` naming " +
+  "exactly one of the listed probe ids, or `CHOICE: NONE` if none of them should be kept. Write nothing " +
+  "before that line."
 
 /** A digest, not a placeholder: two empty strings must never "match" each other. */
 function isDigest(value: string): boolean {
@@ -255,34 +293,45 @@ export async function selectCandidate(input: SelectCandidateInput): Promise<Sele
       reason: `the reply names ${choices.length} choices (${choices.join(", ")}); a selection has to be one`,
     }
   }
-  const chosen = choices.at(0) ?? ""
-  if (chosen.length === 0) {
-    return {
-      status: "refused",
-      code: "SELECTION_UNPARSEABLE",
-      reply,
-      reason: "the reply contains no `CHOICE: <candidate>` line, so there is no decision to record",
-    }
-  }
-  const reading = readChoice(chosen, seen)
+  const reading = readChoice(reply.text, seen)
+  if (reading.kind === "candidate") return { status: "selected", reply, candidateId: reading.id }
   if (reading.kind === "declined") {
     return {
       status: "refused",
       code: "SELECTION_MODEL_DECLINED",
       reply,
       reason:
-        `the reply declined to choose (${JSON.stringify(chosen)}). A decline is a decision, so it is ` +
-        "recorded as one rather than as a candidate nobody named",
+        `the reply declined to choose (${JSON.stringify(choices.at(0) ?? reply.text.trim())}). A decline is a ` +
+        "decision, so it is recorded as one rather than as a candidate nobody named",
     }
   }
-  if (reading.kind === "unknown") {
+  if (reading.kind === "ambiguous") {
+    return {
+      status: "refused",
+      code: "SELECTION_UNPARSEABLE",
+      reply,
+      reason:
+        `the reply names ${reading.mentioned.length} candidates (${reading.mentioned.join(", ")}) without a ` +
+        "`CHOICE:` line, so there is no decision to record",
+    }
+  }
+  // Nothing usable. With a `CHOICE:` line the model named somebody who is not a candidate; without one it
+  // never made a choice at all. Those are different failures and keep different codes.
+  if (choices.length > 0) {
     return {
       status: "refused",
       code: "SELECTION_UNKNOWN_CANDIDATE",
       reply,
-      reason: `the reply chose ${JSON.stringify(chosen)}, which is not one of the candidates ` +
+      reason: `the reply chose ${JSON.stringify(choices.at(0) ?? "")}, which is not one of the candidates ` +
         `(${ids.join(", ")})`,
     }
   }
-  return { status: "selected", reply, candidateId: reading.id }
+  return {
+    status: "refused",
+    code: "SELECTION_UNPARSEABLE",
+    reply,
+    reason:
+      "the reply has no `CHOICE: <candidate>` line and does not name one candidate on its own, so there is " +
+      "no decision to record",
+  }
 }

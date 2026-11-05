@@ -80,7 +80,11 @@ describe("handleRequest", () => {
     const tools = (list.result as { tools: { name: string; inputSchema: { required: string[] } }[] }).tools
     assert.equal(tools.length, 1)
     assert.equal(tools[0]?.name, RUN_TOOL_NAME)
-    assert.deepEqual(tools[0]?.inputSchema.required, ["task"], "only the task is mandatory")
+    assert.deepEqual(
+      tools[0]?.inputSchema.required,
+      ["task", "repo"],
+      "a run needs a task and the absolute path of the workspace it is meant to improve",
+    )
 
     assert.equal(await handleRequest({ jsonrpc: "2.0", method: "notifications/initialized" }), undefined)
   })
@@ -118,10 +122,43 @@ describe("handleRequest", () => {
     assert.equal(result.isError, true)
     assert.match(String(result.structuredContent.error), /task is required/)
   })
+
+  it("rejects a missing, blank, relative or root repo before any run starts", async () => {
+    let captures = 0
+    const deps: McpDeps = {
+      env: { SOLVER_API_KEY: "scripted-key-never-sent" },
+      harness: {
+        capture: async () => {
+          captures += 1
+          throw new Error("a run must not start when `repo` is unusable")
+        },
+      },
+    }
+
+    // `process.cwd()` is the directory the *server* was launched from, not the workspace the agent is
+    // working in, so there is no honest fallback: every unusable `repo` is refused with a way to recover.
+    for (const repo of [undefined, "", "   ", "relative/repo", "."]) {
+      const args: Record<string, unknown> = { task: "do the thing" }
+      if (repo !== undefined) args.repo = repo
+      const result = await callTool(30, args, deps)
+      assert.equal(result.isError, true, `repo ${JSON.stringify(repo)} must be rejected`)
+      assert.match(
+        String(result.structuredContent.error),
+        /retry the call and pass the active workspace's absolute path/,
+        "the caller is told how to recover",
+      )
+    }
+
+    const root = await callTool(31, { task: "do the thing", repo: "/" }, deps)
+    assert.equal(root.isError, true)
+    assert.match(String(root.structuredContent.error), /filesystem root/)
+
+    assert.equal(captures, 0, "validation happens before the loop, so no run is started")
+  })
 })
 
 describe("harness2_run", () => {
-  it("runs zero-config from `task` alone and writes the improved harness back", async () => {
+  it("runs from `task` and `repo` alone and writes the improved harness back", async () => {
     const { root, repo } = await fixture()
     // Call order: improver (after exec-1), selector (after exec-2), improver (refuses, so the run halts).
     const deps = depsFor(root, [

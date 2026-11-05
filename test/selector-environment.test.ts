@@ -224,15 +224,15 @@ describe("readChoice", () => {
   })
 
   it("never turns a rejection into a selection", () => {
-    // A segment scan would read `not candidates/exec-2` as a vote *for* exec-2, which is the opposite of
-    // what the model said. An unreadable reply is the honest outcome.
-    for (const raw of [
-      "not candidates/exec-2",
-      "neither candidates/exec-1 nor candidates/exec-2",
-      "I decline candidates/exec-2",
-    ]) {
+    // Scanning for an id would read `not candidates/exec-2` as a vote *for* exec-2, which is the opposite of
+    // what the model said. Prose is never upgraded into a decision.
+    for (const raw of ["not candidates/exec-2", "I decline candidates/exec-2"]) {
       assert.deepEqual(readChoice(raw, IDS), { kind: "unknown" }, raw)
     }
+    assert.deepEqual(readChoice("neither candidates/exec-1 nor candidates/exec-2", IDS), {
+      kind: "ambiguous",
+      mentioned: ["exec-1", "exec-2"],
+    })
   })
 
   it("leaves an id that starts with a wrapper character intact", () => {
@@ -245,5 +245,53 @@ describe("readChoice", () => {
     for (const raw of ["NONE", "none", "REFUSED", "REFUSE: the probes differ"]) {
       assert.deepEqual(readChoice(raw, IDS), { kind: "declined" }, raw)
     }
+  })
+})
+
+describe("selectCandidate reads a decision written without the CHOICE: label", () => {
+  it("asks for the decision on the very first line", () => {
+    assert.match(DEFAULT_SELECTOR_ASK, /very first line/)
+    assert.match(DEFAULT_SELECTOR_ASK, /CHOICE: NONE/)
+  })
+
+  it("accepts a reply that is only the id", async () => {
+    const { outcome } = await compare("exec-2")
+    assert.equal(outcome.status, "selected")
+    if (outcome.status !== "selected") return
+    assert.equal(outcome.candidateId, "exec-2")
+  })
+
+  it("accepts an id on the first or last line of a longer reply", async () => {
+    for (const reply of [
+      "exec-2\n\nThe first probe cites the rule it applies.\n",
+      "Both cite rules, but I prefer:\nexec-2",
+    ]) {
+      const { outcome } = await compare(reply)
+      assert.equal(outcome.status, "selected", reply)
+      if (outcome.status !== "selected") continue
+      assert.equal(outcome.candidateId, "exec-2")
+    }
+  })
+
+  it("refuses prose that names several candidates without choosing one", async () => {
+    const { outcome } = await compare("exec-1 cites the rule and exec-2 applies it, so either works.")
+    assert.equal(outcome.status, "refused")
+    if (outcome.status !== "refused") return
+    assert.equal(outcome.code, "SELECTION_UNPARSEABLE")
+    assert.match(outcome.reason, /without a `CHOICE:` line/)
+  })
+
+  it("refuses prose that mentions one candidate without choosing it", async () => {
+    const { outcome } = await compare("I would rather not pick, though exec-2 looks fine.")
+    assert.equal(outcome.status, "refused")
+    if (outcome.status !== "refused") return
+    assert.equal(outcome.code, "SELECTION_UNPARSEABLE")
+  })
+
+  it("treats a bare REFUSE line as a decline", async () => {
+    const { outcome } = await compare("REFUSE: the two probes are indistinguishable")
+    assert.equal(outcome.status, "refused")
+    if (outcome.status !== "refused") return
+    assert.equal(outcome.code, "SELECTION_MODEL_DECLINED")
   })
 })

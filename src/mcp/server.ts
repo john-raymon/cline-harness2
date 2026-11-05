@@ -36,19 +36,20 @@ export interface JsonRpcResponse {
   readonly error?: { readonly code: number; readonly message: string; readonly data?: unknown }
 }
 
-/** The tool a Cline agent sees. `repo` and `k` are optional because their defaults are almost always right. */
+/** The tool a Cline agent sees. `task` and `repo` are required: there is no working directory to guess from. */
 export const RUN_TOOL = {
   name: RUN_TOOL_NAME,
   description:
     "Run the harness2 self-improvement loop on a repository and return the improved harness files. " +
-    "Every threshold, provider and model setting is defaulted; only the task is required.",
+    "Every threshold, provider and model setting is defaulted; `task` and `repo` are required.",
   inputSchema: {
     type: "object",
     properties: {
       task: { type: "string", minLength: 1, description: "the task the harness should be able to do" },
       repo: {
         type: "string",
-        description: "repository to improve (default: the server's working directory)",
+        description:
+          "Required absolute path to the target repository workspace (e.g. /Users/johnraymon/Projects/<repo>).",
       },
       k: {
         type: "integer",
@@ -61,16 +62,25 @@ export const RUN_TOOL = {
         description: "write the winning harness back into the repository (default true)",
       },
     },
-    required: ["task"],
+    required: ["task", "repo"],
   },
 } as const
+
+/**
+ * What the caller is told when `repo` is unusable.
+ *
+ * The server used to fall back to `process.cwd()`, which is the directory the MCP server was launched from —
+ * not the workspace the agent is working in. A run silently improved the wrong repository and reported
+ * success. Asking the caller for the path it actually means is the only honest default.
+ */
+const REPO_RETRY =
+  "retry the call and pass the active workspace's absolute path in `repo` " +
+  "(e.g. /Users/johnraymon/Projects/<repo>)"
 
 export interface McpDeps {
   /** Overrides for the run, used by tests: the whole loop is already a set of ports. */
   readonly harness?: RunHarnessDeps
   readonly now?: () => Date
-  /** Working directory used when a call omits `repo`. */
-  readonly cwd?: string
   /** Environment used to resolve configuration. Defaults to `process.env`; injected by tests. */
   readonly env?: Readonly<Record<string, string | undefined>>
 }
@@ -113,8 +123,28 @@ async function runTool(params: Record<string, unknown>, deps: McpDeps): Promise<
     return { isError: true, payload: { error: "task is required and must be a non-empty string" } }
   }
 
-  const repo =
-    typeof params.repo === "string" && params.repo.length > 0 ? params.repo : (deps.cwd ?? process.cwd())
+  const rawRepo = params.repo
+  if (typeof rawRepo !== "string" || rawRepo.trim().length === 0) {
+    return { isError: true, payload: { error: `repo is required: ${REPO_RETRY}` } }
+  }
+  if (!path.isAbsolute(rawRepo)) {
+    return {
+      isError: true,
+      payload: {
+        error: `repo must be an absolute path, got ${JSON.stringify(rawRepo)}: ${REPO_RETRY}`,
+      },
+    }
+  }
+  const repo = path.resolve(rawRepo)
+  if (repo === path.parse(repo).root) {
+    return {
+      isError: true,
+      payload: {
+        error: `repo must name a repository workspace, not the filesystem root (${repo}): ${REPO_RETRY}`,
+      },
+    }
+  }
+
   const k = params.k
   if (k !== undefined && (typeof k !== "number" || !Number.isInteger(k) || k < 1 || k > 16)) {
     return { isError: true, payload: { error: "k must be an integer between 1 and 16" } }
