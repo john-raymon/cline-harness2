@@ -93,7 +93,7 @@ export type OracleProvider = (typeof ORACLE_PROVIDERS)[number]
  * Named here rather than inside the oracle module so `loadConfig` and the clients cannot disagree
  * about which model a missing value means.
  */
-export const DEFAULT_GEMINI_MODEL_ID = "gemini-4-argon"
+export const DEFAULT_GEMINI_MODEL_ID = "gemini-4-carbon"
 export const DEFAULT_ASTRA_MODEL_ID = "gpt-6-astra"
 
 export interface ConfigKeySpec {
